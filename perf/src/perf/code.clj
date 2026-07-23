@@ -217,6 +217,42 @@
                 :suggestion (suggestion-for c detail)}
       (alternatives detail))))
 
+
+;; ── why this parses prose, which looks like laziness ───────────────
+;;
+;; It is fair to ask whether the JVM/Clojure world offers a structured
+;; channel for this instead of a regex over *err*. It does — Eastwood and
+;; clj-kondo exist — and it was tried here and rejected on measurement.
+;;
+;; clojure.tools.analyzer.jvm carries both facts in its typed AST:
+;;
+;;   (.length s)          :op :host-interop                  <- unresolved
+;;   (.length ^String s)  :op :instance-call :validated? true :tag int
+;;   (+ ^long a ^long b)  :op :static-call Numbers/add :tag long
+;;
+;; Three reasons it is not used, all measured on this machine:
+;;
+;;   1. IT IS LESS COMPLETE. On (fn [a b] (+ (* a b) a)) the analyzer gave
+;;      :tag java.lang.Number for `multiply` and :tag NIL for `add` — no
+;;      tag at all on a node where the compiler definitely emitted boxed
+;;      math. It is a separate implementation of Clojure's analysis, and
+;;      where the two disagree the compiler is right by definition.
+;;   2. It is slower — 8.1 ms against 5.2 ms over the same four forms,
+;;      which is the same reason Eastwood measured 73 ms against 4.4 ms.
+;;   3. It costs four dependencies (tools.analyzer.jvm, core.memoize,
+;;      core.cache, data.priority-map) to reimplement a fact the compiler
+;;      already reports.
+;;
+;; So the string IS the API here, not for want of looking.
+;;
+;; THE ONE THING THE ANALYZER HAD, AND THE HAZARD IT EXPOSED: analysing a
+;; form does not run it; `notes*` EVALUATES the form it is asked to
+;; inspect. Measured — analysing (do (swap! a conj :x) ..) left the atom
+;; empty, eval'ing it did not. For a defn or a fn that is harmless, and
+;; those are what this is for. For a form with side effects it is not, and
+;; the mitigation is one character: wrap it. (notes '(fn [] (spit ...)))
+;; evaluates to a function and calls nothing.
+
 (defn notes*
   "Compile FORM with every compiler advisory switched on and return what
   the compiler could not do, as data, ranked by measured cost.
@@ -240,6 +276,13 @@
 
   Compiles in a THROWAWAY namespace. Evaluating a defn to inspect it
   should not define it in yours, and an earlier version did exactly that.
+
+  IT EVALUATES THE FORM. That is how the compiler is made to report, and
+  it means side effects in the form happen. Give it definitions — a defn
+  or a fn — which is what it is for. To inspect something effectful,
+  wrap it: (notes '(fn [] (spit path x))) builds a function and calls
+  nothing. See the note above on why the analyzer, which would avoid
+  this, is not used.
 
   Returns [] when there is nothing to say. A diagnostic that always fires
   is noise, and noise gets filtered wholesale."
