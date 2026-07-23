@@ -24,9 +24,35 @@
     (code/types  form [3 4])        ; what it concluded about types
     (code/notes  form)              ; what it could not do, ranked by cost
     (code/weigh  form [3 4])        ; the cheap path vs the expensive one
+    (code/fix    form [3 4])        ; the verified rewrite, paste-able
     (code/java   form)              ; the Java it emitted
     (code/bytecode form)            ; the bytecode
     (code/native 'my.ns/f [42])     ; the x86, via hsdis
+
+  And the three gaps the comparison left open, closed the same way each
+  time — by using information already in hand rather than adding surface:
+
+    (code/watch!)                   ; notes for EVERYTHING compiled, as
+                                    ; SBCL does by default. No compiler
+                                    ; hook exists; the switches and the
+                                    ; stream they write to are plain vars,
+                                    ; so root-bind them and tee the stream.
+
+    :perf.note/taken / :refused     ; SBCL prints the path taken beside
+                                    ; the path refused. The boxed-math
+                                    ; message names the overload chosen,
+                                    ; and the JVM knows the others — so
+                                    ; they are READ OFF THE CLASS, not
+                                    ; remembered in a table.
+
+    (code/fix form args)            ; rustc suggests and cargo fix APPLIES.
+                                    ; Every suggestion here carried an
+                                    ; :applicability copied from rustc with
+                                    ; nothing on the other end. `weigh`
+                                    ; already produced a rewrite that
+                                    ; recompiled clean and returned the
+                                    ; same value; `fix` hands it back as
+                                    ; source you can paste.
 
   NOTES ARE RANKED BY COST. SBCL prints notes in source order; a hot loop
   with one reflective call and nine boxed additions reads as ten equal
@@ -78,6 +104,17 @@
   [note-code]
   (get-in costs [note-code :perf.cost/factor]))
 
+;; ── naming ────────────────────────────────────────────────────────
+;; Used by both the notes rung and the types rung, so it lives above
+;; both rather than beside whichever one happened to need it first.
+
+(def ^:private prim-names
+  {Long/TYPE 'long Double/TYPE 'double Integer/TYPE 'int Float/TYPE 'float
+   Boolean/TYPE 'boolean Character/TYPE 'char Byte/TYPE 'byte
+   Short/TYPE 'short Void/TYPE 'void})
+
+(defn- tname [^Class c] (or (prim-names c) (symbol (.getSimpleName c))))
+
 ;; ── rung 1: notes ─────────────────────────────────────────────────
 
 (def ^:private warning-re
@@ -102,19 +139,83 @@
      :perf.note/example "(defn f ^long [^long n] ...)"}
     nil))
 
+;; ── what the compiler took, and what it could have taken ──────────
+;;
+;; SBCL prints "forced to do GENERIC-+ (cost 10)" beside "unable to do
+;; inline float arithmetic (cost 2)" — the path taken against the path
+;; refused, from its own cost model, free on every compile. That is a
+;; better answer than a lookup table, and Clojure discloses enough to
+;; reach it: a boxed-math warning names the exact overload chosen,
+;;
+;;   clojure.lang.Numbers.unchecked_add(java.lang.Object,java.lang.Object)
+;;
+;; and the JVM will tell you what the other overloads of that method are.
+;; So the alternatives are READ OFF THE CLASS, not remembered. No cost
+;; model of our own is invented — the fact reported is "you got the
+;; Object overload; these primitive ones exist", which is checkable.
+
+(def ^:private call-re
+  ;; Anchored on the call at the END, not on a token count at the start:
+  ;; the message is "call: public static java.lang.Number
+  ;; clojure.lang.Numbers.unchecked_add(...)" and counting modifiers and
+  ;; return types ahead of the class is a way to be wrong about a
+  ;; signature you did not anticipate.
+  #"([\w.$]+)\.(\w+)\(([^)]*)\)\s*\.?\s*$")
+
+(defn- overloads
+  "Every overload of CLS.METHOD, flagged with which one was selected."
+  [cls method taken-params]
+  (try
+    (let [k (Class/forName cls)]
+      (->> (.getDeclaredMethods k)
+           (filter #(= method (.getName ^java.lang.reflect.Method %)))
+           (map (fn [^java.lang.reflect.Method m]
+                  (let [ps (mapv tname (.getParameterTypes m))]
+                    #:perf.overload{:params ps
+                                    :returns (tname (.getReturnType m))
+                                    :taken? (= ps taken-params)
+                                    :primitive? (every? '#{long double int float
+                                                           boolean char byte short} ps)})))
+           (sort-by (comp str :perf.overload/params))
+           vec))
+    (catch Throwable _ nil)))
+
+(defn- alternatives
+  "For a boxed-math message, the overload taken and the ones refused."
+  [detail]
+  (when-let [[_ cls method params] (re-find call-re detail)]
+    (let [taken (mapv #(-> % (str/split #"\.") last symbol)
+                      (remove str/blank? (str/split params #",")))
+          all (overloads cls method taken)]
+      (when (seq all)
+        ;; Only the FULLY primitive overloads of the same arity. Numbers
+        ;; carries every mixed pairing — (Object,long), (double,Object)
+        ;; and six more — and listing all eight buries the two that are
+        ;; the actual target. SBCL names the one alternative it wanted;
+        ;; this names the ones that would remove the boxing entirely.
+        #:perf.note{:taken (str method "(" (str/join "," taken) ")")
+                    :refused (vec (for [o all
+                                        :when (and (not (:perf.overload/taken? o))
+                                                   (:perf.overload/primitive? o)
+                                                   (= (count (:perf.overload/params o)) (count taken)))]
+                                    (str method "(" (str/join "," (:perf.overload/params o))
+                                         ")->" (:perf.overload/returns o))))}))))
+
 (defn- parse-warnings [s]
   (for [[_ kind file line col detail] (re-seq warning-re s)
         :let [c (code-of kind)]]
-    #:perf.note{:code c
-                :severity :perf.severity/warning
-                :span {:perf/file (when-not (= file "NO_SOURCE_PATH") file)
-                       :perf/line (parse-long line)
-                       :perf/col (parse-long col)}
-                :message (str/replace detail #"\.$" "")
-                :cost (cost c)
-                :cost-basis (get-in costs [c :perf.cost/basis])
+    (merge
+     #:perf.note{:code c
+                 :severity :perf.severity/warning
+                 :span {:perf/file (when-not (= file "NO_SOURCE_PATH") file)
+                        :perf/line (parse-long line)
+                        :perf/col (parse-long col)}
+                 :message (str/replace detail #"\.$" "")
+                 :cost (cost c)
+                 :cost-basis (get-in costs [c :perf.cost/basis])
                 :why (get-in costs [c :perf.cost/why])
-                :suggestion (suggestion-for c detail)}))
+                :suggestion (suggestion-for c detail)}
+      (alternatives detail))))
 
 (defn notes*
   "Compile FORM with every compiler advisory switched on and return what
@@ -166,7 +267,11 @@
   "Render notes the way rustc and SBCL do — one block per note, worst
   first. The data is still the data; this is one rendering of it."
   [ns]
-  (let [ns (if (vector? ns) ns [ns])]
+  ;; sequential?, not vector?. Anything that filters or takes hands you a
+  ;; lazy seq, which vector? rejects — so it got wrapped in a vector and
+  ;; iterated as ONE note whose every key was nil. `(explain (take 1 ns))`
+  ;; threw a NullPointerException out of `name`.
+  (let [ns (if (sequential? ns) ns [ns])]
     (with-out-str
       (doseq [n ns]
         (printf "note[%s]: %s\n" (name (:perf.note/code n)) (:perf.note/message n))
@@ -176,6 +281,9 @@
           (printf "   = cost: %sx  (%s)\n" c (name (:perf.note/cost-basis n))))
         (when-let [w (:perf.note/why n)] (printf "   = why: %s\n" w))
         (when-let [e (:perf.note/emitted n)] (printf "   = emitted: %s\n" e))
+        (when-let [t (:perf.note/taken n)] (printf "   = took:    %s\n" t))
+        (when-let [r (seq (:perf.note/refused n))]
+          (printf "   = refused: %s\n" (str/join ", " r)))
         (when-let [v (:perf.note/var n)] (printf "   = var: %s\n" v))
         (when-let [s (:perf.note/suggestion n)]
           (printf "  help: %s\n        %s\n"
@@ -298,13 +406,6 @@
 ;; With sample values it gets sharper still: inferred vs ACTUAL. "The
 ;; compiler said Object; every value you passed was a Long" is the
 ;; actionable form, and it is what `weigh` then uses to build the rewrite.
-
-(def ^:private prim-names
-  {Long/TYPE 'long Double/TYPE 'double Integer/TYPE 'int Float/TYPE 'float
-   Boolean/TYPE 'boolean Character/TYPE 'char Byte/TYPE 'byte
-   Short/TYPE 'short Void/TYPE 'void})
-
-(defn- tname [^Class c] (or (prim-names c) (symbol (.getSimpleName c))))
 
 (defn emitted-signature
   "The signatures the compiler actually emitted for a fn value or var.
@@ -509,6 +610,136 @@
                       ;; the original and looks like nothing happened.
                       :hints (param-tags rewrite)
                       :rewrite rewrite})))))
+
+;; ── always-on ─────────────────────────────────────────────────────
+;;
+;; SBCL's notes arrive on EVERY compile without being asked. `notes` is
+;; something you call on a form you already suspect, and the gap between
+;; "available" and "automatic" is most of the value — you cannot suspect
+;; the line you did not think about.
+;;
+;; Clojure exposes no compiler hook, but the two switches and the stream
+;; they write to are all plain vars with root bindings. So: turn the
+;; switches on at the root and tee the stream. Everything compiled from
+;; then on — by you, by `require`, by the REPL — accumulates notes, and
+;; stderr still gets its output, so nothing that was reading it breaks.
+
+(defonce ^:private watch-state (atom nil))
+
+(defn- tee-writer [^java.io.Writer original ^StringBuffer sink]
+  (proxy [java.io.Writer] []
+    (write
+      ([x]
+       (if (integer? x)
+         (do (.write original (int x)) (.append sink (char x)))
+         (let [s (str x)] (.write original s) (.append sink s))))
+      ([x off len]
+       (if (string? x)
+         (do (.write original ^String x (int off) (int len))
+             (.append sink (subs x off (+ off len))))
+         (do (.write original ^chars x (int off) (int len))
+             (.append sink (String. ^chars x (int off) (int len)))))))
+    (flush [] (.flush original))
+    (close [] (.flush original))))
+
+(defn watch!
+  "Collect notes for EVERYTHING compiled from now on. SBCL's default.
+
+  Alters the ROOT bindings of *warn-on-reflection*, *unchecked-math* and
+  *err*, so it affects every thread and every later `require`. stderr
+  still receives everything it did before — the writer tees rather than
+  swallows, because a diagnostic tool that silently eats your stack traces
+  has made things worse.
+
+  Reversible with `unwatch!`. Idempotent."
+  []
+  (or @watch-state
+      (let [sink (StringBuffer.)
+            original *err*
+            prev {:warn (.getRawRoot #'*warn-on-reflection*)
+                  :math (.getRawRoot #'*unchecked-math*)
+                  :err original
+                  :sink sink}]
+        (alter-var-root #'*warn-on-reflection* (constantly true))
+        (alter-var-root #'*unchecked-math* (constantly :warn-on-boxed))
+        (alter-var-root #'*err* (constantly (tee-writer original sink)))
+        ;; AND the thread-locals. clojure.main installs thread-local
+        ;; bindings for exactly these vars, and a thread-local shadows the
+        ;; root — so altering the root alone left the calling REPL
+        ;; unaffected and watch! silently caught only the reflection
+        ;; warnings that happened to be enabled already. set! throws when
+        ;; there is no thread-local frame to write to, which is fine and
+        ;; means the root is already the value being read.
+        (doseq [v [#'*warn-on-reflection* #'*unchecked-math* #'*err*]]
+          (try (var-set v (.getRawRoot ^clojure.lang.Var v)) (catch Throwable _ nil)))
+        (reset! watch-state prev)
+        :watching)))
+
+(defn watched
+  "Notes accumulated since `watch!`, ranked by cost. Cheap to call."
+  []
+  (if-let [{:keys [sink]} @watch-state]
+    (do
+      ;; Flush FIRST. The compiler's writes sit in the PrintWriter until
+      ;; something forces them out, so reading the sink straight away
+      ;; reported one note where unwatch! a moment later reported two —
+      ;; the tool under-counting because it asked too early.
+      (.flush ^java.io.Writer *err*)
+      (vec (sort-by #(- (or (:perf.note/cost %) 0))
+                    (parse-warnings (str sink)))))
+    []))
+
+(defn unwatch!
+  "Restore the root bindings `watch!` changed, and return what it saw."
+  []
+  (if-let [{:keys [warn math err]} @watch-state]
+    (let [ns (watched)]
+      (alter-var-root #'*warn-on-reflection* (constantly warn))
+      (alter-var-root #'*unchecked-math* (constantly math))
+      (alter-var-root #'*err* (constantly err))
+      (doseq [v [#'*warn-on-reflection* #'*unchecked-math* #'*err*]]
+        (try (var-set v (.getRawRoot ^clojure.lang.Var v)) (catch Throwable _ nil)))
+      (reset! watch-state nil)
+      ns)
+    []))
+
+;; ── applying it ───────────────────────────────────────────────────
+
+(defn fix
+  "The verified rewrite for FORM, as data AND as source text.
+
+  rustc emits a suggested replacement with an applicability, and
+  `cargo fix` applies it. Every suggestion here carried an
+  `:applicability` copied from rustc with nothing on the other end to act
+  on it. `weigh` already produces a rewrite that recompiled clean and
+  returned the same value; this is that rewrite, handed back in a form you
+  can paste or an editor can insert.
+
+  `:source` exists because the hints live in METADATA, which pr-str hides
+  — the rewrite prints identical to the original and looks like nothing
+  happened. Printed with *print-meta*, the ^long shows up.
+
+  nil when there is nothing to fix, or when the rewrite did not verify."
+  ([form args] (fix form args {}))
+  ([form args opts]
+   (let [w (weigh form args (merge {:trials 1 :reps 200000} opts))]
+     (when (:perf.weigh/verified w)
+       #:perf.fix{:form (:perf.weigh/rewrite w)
+                  ;; Reader metadata stripped: every form carries :line and
+                  ;; :column, and printing those beside the ^long turns a
+                  ;; paste-able suggestion into a mess.
+                  :source (binding [*print-meta* true]
+                            (pr-str (walk/postwalk
+                                     (fn [x]
+                                       (if-let [m (meta x)]
+                                         (let [keep (select-keys m [:tag])]
+                                           (with-meta x (not-empty keep)))
+                                         x))
+                                     (:perf.weigh/rewrite w))))
+                  :hints (:perf.weigh/hints w)
+                  :same-result (:perf.weigh/same-result w)
+                  :notes-before (:perf.weigh/notes-before w)
+                  :notes-after (:perf.weigh/notes-after w)}))))
 
 (defn ladder
   "Every rung for one form, as data. The whole point of the namespace in
