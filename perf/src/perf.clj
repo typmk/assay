@@ -18,6 +18,7 @@
     perf.capability what works here and why not — one registry
     perf.capture    start -> value; three mechanisms (stream/poll/census)
     perf.query      pure fns over observations — testable with literals
+    perf.code       the ladder: expand -> notes -> java -> bytecode -> native
     perf.diagnose   structured diagnostics with machine-applicable fixes
     perf.control    things that CHANGE execution — trace, restarts
     perf.native     FFM: prevent / recover / isolate
@@ -31,6 +32,7 @@
   render the whole graph without knowing this library exists."
   (:require [perf.capture :as capture]
             [perf.query :as query]
+            [perf.code]
             [perf.capability :as capability]))
 
 (defn watch
@@ -100,15 +102,30 @@
   (capability/require! :self-attach)
   ((resolve! 'clj-memory-meter.core/measure) val))
 
-;; ── The two that must stay macros ─────────────────────────────────
-;; These consume the FORM itself, not its value — decompilation has
-;; nothing to work with otherwise. That is the real test for a macro.
+;; ── The ladder ────────────────────────────────────────────────────
+;;
+;; These moved to perf.code, which is the whole ladder rather than two
+;; rungs of it: expand -> notes -> java -> bytecode -> native. They stay
+;; here as one-line delegations because they are the two people reach for
+;; most, and macros cannot be re-exported by def — the form has to survive
+;; unevaluated, which is exactly why they are macros.
 
 (defmacro java
   "The Java the Clojure compiler emitted — where reflection and boxing
-  become visible."
+  become visible. See `perf.code/java`."
   [form]
-  `((resolve! 'clj-java-decompiler.core/decompile-form) {} '~form))
+  `(perf.code/java ~form))
 
-(defmacro bytecode [form]
-  `((resolve! 'clj-java-decompiler.core/decompile-form) {:decompiler :bytecode} '~form))
+(defmacro bytecode
+  "JVM bytecode. See `perf.code/bytecode`."
+  [form]
+  `(perf.code/bytecode ~form))
+
+(defmacro notes
+  "What the compiler could not do, as data, ranked by measured cost —
+  Clojure's answer to SBCL's efficiency notes. See `perf.code/notes`.
+
+    (perf/notes '(defn f [s] (.length s)))
+    ;; => [#:perf.note{:code :perf.note/reflection :cost 202 ...}]"
+  [form]
+  `(perf.code/notes ~form))

@@ -109,6 +109,50 @@ you can profile a service that knows nothing about this library:
 ;;      :perf/d-instances 37953 :perf/d-bytes 1214496})
 ```
 
+## The ladder
+
+What you wrote, what the compiler gave up on, what it emitted, what the
+CPU runs. Julia's `@code_*` family is the model; SBCL supplies the other
+half, efficiency notes that arrive automatically and carry cost numbers.
+
+```clojure
+(require '[perf.code :as code])
+
+(code/expand '(when x 1))        ; => (if x (do 1))
+(code/notes  '(defn f [s] (.length s)))
+(code/java     (fn [^long n] (* n 3)))
+(code/bytecode (fn [^long n] (* n 3)))
+(code/native 'my.ns/tripled [7]) ; x86, via hsdis, in a fresh JVM
+```
+
+`notes` is the piece Clojure does not give you. `*warn-on-reflection*` and
+`*unchecked-math* :warn-on-boxed` are the compiler saying it had to take a
+slow path — the same signal SBCL emits — but they go to `*err*` as prose,
+unranked, and only if you remembered to bind them. So:
+
+```clojure
+(code/notes '(defn g [a b s] (+ (* a b) (.length s))))
+;; => [#:perf.note{:code :perf.note/reflection :cost 202   :span {...}}
+;;     #:perf.note{:code :perf.note/boxed-math :cost 1.25  :span {...}}
+;;     #:perf.note{:code :perf.note/boxed-math :cost 1.25  :span {...}}]
+```
+
+**Ranked by measured cost, worst first** — which SBCL does not do. It
+prints notes in source order, so one reflective call and nine boxed
+additions read as ten equal complaints. Reflection measured 202× here and
+boxing 1.25×, so the reflective call is the only one worth your morning.
+Costs live in `perf.code/costs` with their basis attached, and
+`perf.diagnose` reads the same map, so the number a diagnostic quotes and
+the number `notes` sorts by cannot drift apart.
+
+Compilation happens in a throwaway namespace — inspecting a `defn` should
+not define it in yours.
+
+`native` is the one rung that needs a second JVM: `PrintAssembly` is read
+at VM startup, so the process you are sitting in either has it or cannot
+be made to. It also needs a var loadable from the classpath, which a
+REPL-defined fn is not.
+
 ## Browsing
 
 Observations are `Navigable`. Nav a `:perf/site` or a stack frame and you
