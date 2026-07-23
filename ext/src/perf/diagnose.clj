@@ -31,36 +31,20 @@
   (:require [clojure.string :as str]
             [perf.code :as code]))
 
-(def ^:private prim
-  {Long/TYPE "long" Double/TYPE "double" Integer/TYPE "int"
-   Boolean/TYPE "boolean" Void/TYPE "void" Float/TYPE "float"
-   Character/TYPE "char" Byte/TYPE "byte" Short/TYPE "short"})
-
-(defn- tname [^Class c] (or (prim c) (.getSimpleName c)))
-
 (defn signature
-  "Emitted method signatures for a fn var.
-
-  This is the whole Clojure-side compile-time surface: the compiler's one
-  load-bearing decision is PRIMITIVE or BOXED, and it is readable straight
-  off invokeStatic without running anything."
+  "Emitted method signatures for a fn var — delegated to
+  `perf.code/emitted-signature`, which is the same read of the same class.
+  This namespace kept its own copy, with its own primitive-name table and
+  its own five reflective calls."
   [v]
-  (let [obj (if (var? v) @v v)]
-;; Hinted, because five reflective calls in the namespace that reports
-    ;; reflection is not a defensible place to leave them.
-    (->> (.getDeclaredMethods ^Class (class obj))
-         (filter #(#{"invokeStatic" "invoke" "invokePrim"}
-                   (.getName ^java.lang.reflect.Method %)))
-         (map (fn [^java.lang.reflect.Method m]
-                (let [ps (vec (.getParameterTypes m)) ret (.getReturnType m)]
-                  {:method (.getName m)
-                   :params (mapv tname ps)
-                   :returns (tname ret)
-                   :primitive? (and (seq ps)
-                                    (every? #(.isPrimitive ^Class %) ps)
-                                    (.isPrimitive ret))})))
-         (sort-by :method)
-         vec)))
+  (mapv (fn [m]
+          {:method (:perf.types/method m)
+           :params (mapv str (:perf.types/params m))
+           :returns (str (:perf.types/returns m))
+           :primitive? (and (seq (:perf.types/params m))
+                            (not-any? #(= 'Object %) (:perf.types/params m))
+                            (not= 'Object (:perf.types/returns m)))})
+        (code/emitted-signature v)))
 
 (defn boxing
   "Diagnostic for a fn var: primitive body or boxed?

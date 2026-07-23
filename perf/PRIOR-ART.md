@@ -95,6 +95,49 @@ What appears NOT to be in CDT: forceEarlyReturn restarts — resuming a
 suspended failure by making the frame return a value. CDT catches,
 inspects and evaluates; I found no mention of continuing with a value.
 
+### Eastwood — https://github.com/jonase/eastwood
+
+**Prior art for `perf.code/notes`, found only because Apollo asked "surely
+this already exists?" — which is the question I should have asked before
+writing it, for the third time in this project.**
+
+Eastwood is a lint tool built on tools.analyzer.jvm, and it has shipped
+`:reflection` ("Reflection warnings from the Clojure compiler") and
+`:boxed-math` ("Boxed math compiler warnings") linters for years. Its
+mechanism is the same one here: pattern-matching the compiler's messages.
+And it already returns data — `lint` "returns a map containing data
+structures describing any warnings or errors encountered. For example,
+file names, line numbers, and column numbers are all available
+separately, requiring no parsing of strings."
+
+So "compiler warnings as structured data" is not new, and `notes` is
+substantially Eastwood's two linters at form granularity.
+
+What Eastwood's documentation does NOT describe, and what is kept here:
+
+  * **cost on each note, and ranking by it.** Eastwood reports warnings
+    uniformly with no severity or priority. Reflection measured 202x
+    against boxing at 1.25x, so ordering is the difference between one fix
+    and ten.
+  * **`weigh`** — deriving the alternative from what the warning
+    disclosed, verifying it by recompiling until the notes go away, and
+    timing both. Found nothing doing this.
+  * **form granularity.** Eastwood lints NAMESPACES; `notes` takes a form
+    at the REPL, which is what a ladder rung has to do.
+
+For scanning a whole project, use Eastwood. It is the better tool for
+that job, and `perf.diagnose/scan` is the part of this that genuinely
+duplicates it.
+
+### clj-java-decompiler / Clojure Goes Fast
+
+The blog makes the argument `perf.code/types` acts on — that checking
+"whether you are really using primitive math and unboxed types is more
+reliable than compiler warnings" — and clj-java-decompiler gives you the
+Java to read. Reading the emitted signature as DATA
+(`emitted-signature`) is the small remaining step, and the decompiler
+does the heavy lifting for the rungs either side of it.
+
 ### coffi — https://github.com/IGJoshua/coffi
 
 `org.suskalo/coffi`, a maintained wrapper over java.lang.foreign,
