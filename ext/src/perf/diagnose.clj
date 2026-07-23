@@ -77,6 +77,13 @@
 (defn scan
   "Diagnostics for every OPTED-IN fn in NS.
 
+  USE EASTWOOD INSTEAD when you have source files. Measured side by side
+  it found the same warnings this does, has thirty linters against these
+  two, and is maintained for the job. This scan earns its place only in
+  the case Eastwood cannot reach: already-LOADED vars, with no
+  :source-paths, read from the compiled signature rather than from source
+  — a REPL where the code arrived by eval.
+
   Opt-in is copied from SBCL, which only emits efficiency notes where you
   wrote (declare (optimize speed)). Most Clojure fns are legitimately
   Object->Object; flagging them all would bury the signal, and an

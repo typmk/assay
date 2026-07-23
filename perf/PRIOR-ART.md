@@ -113,6 +113,32 @@ separately, requiring no parsing of strings."
 So "compiler warnings as structured data" is not new, and `notes` is
 substantially Eastwood's two linters at form granularity.
 
+**Run side by side, Eastwood 1.4.3 / Clojure 1.12.4, on the same four
+functions** (one reflective, one boxed, one clean, one both):
+
+  * **The findings are identical.** Eastwood: 3 boxed-math + 2 reflection.
+    `notes`: reflective->[reflection], boxed->[boxed-math x2], clean->[],
+    mixed->[reflection boxed-math]. Same five, same lines. No disagreement
+    to adjudicate.
+  * **Eastwood 73 ms, notes 4.4 ms**, both warm. Not a fair fight and not
+    a point in my favour: Eastwood builds a full tools.analyzer AST and
+    can run thirty linters off it. `notes` evals a form and greps stderr
+    for two patterns. Different amounts of work.
+  * **Thirty linters against two.** `performance`, `wrong-tag`,
+    `unused-ret-vals`, `constant-test`, `suspicious-expression`,
+    `local-shadows-var` and more. Nothing here approaches that.
+  * **Its data API did not work in my hands.** `eastwood.lint/lint` is
+    documented to return "a map containing data structures"; it returned
+    `{:warnings 0 :err true}` with an NPE from `effective-namespaces`,
+    with and without `default-opts` merged. Going through a custom
+    reporter, the `note` multimethod received only banner strings — the
+    warnings travel a protocol method that needs the whole reporter
+    implemented. The printing path is correct and complete; getting the
+    data out is work. Recorded as observed on this machine, not as a
+    verdict on the library.
+  * **Eastwood needs source files.** It lints namespaces off `:source-paths`.
+    A ladder rung has to take a form you just typed.
+
 What Eastwood's documentation does NOT describe, and what is kept here:
 
   * **cost on each note, and ranking by it.** Eastwood reports warnings
