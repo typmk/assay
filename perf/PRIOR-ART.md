@@ -1,0 +1,154 @@
+# Prior art
+
+Researched after building, which is the wrong order. Most of what this
+does has been done, often better. This file exists so the README does not
+have to imply otherwise.
+
+## Directly overlapping
+
+### Sayid — https://github.com/clojure-emacs/sayid
+
+**The closest prior art, and it is closer than I expected.** An
+"omniscient debugger and profiler" that intercepts and records the inputs
+and outputs of functions, lets you select what to trace by var or
+namespace, and displays, queries and profiles the result. Version 0.7
+made the trace itself data — `sayid.data/trace-data` returns the call
+tree as plain Clojure data with the captured values. 0.8 shipped in July
+2026; it is maintained under `mx.cider/sayid`.
+
+`perf.control` had a hand-rolled Var-rebinding tracer. **It has been
+deleted.** Measured side by side on the same three functions: mine
+returned `[[6] 12]` — flat, per-var, timing in a separate map; Sayid
+returned a nested call tree with `:args :return :children :depth
+:started-at :ended-at :arg-map :meta` from a single `ws-add-trace-ns!`.
+It also has inner tracing (every intermediate expression, via
+`tools.analyzer.jvm`), a query layer and CIDER integration.
+
+`perf.trace` is now a bridge: profile finds the site, Sayid records its
+values. Keeping a worse reimplementation because I wrote it would have
+been the sunk-cost version of engineering.
+
+What `perf` does that Sayid does not: JFR-sourced allocation, blocking
+and deoptimisation events. Different data entirely.
+
+### Tufte — https://github.com/taoensso/tufte
+
+Form-level profiling "without the low-level JVM noise", with metrics as
+**Clojure maps that are easily aggregated, analysed, logged and
+serialized**. Thread-local and dynamic profiling.
+
+Tufte reached the data-not-reports conclusion long before I did, and its
+scope — *your* `p`-wrapped forms — is deliberately the complement of
+this: Tufte measures what you instrument, `perf` samples what the JVM
+does. Different question, same philosophy.
+
+### clj-async-profiler — https://github.com/clojure-goes-fast/clj-async-profiler
+
+Embedded async-profiler with interactive flamegraphs, low enough overhead
+for production, covering CPU, allocation, locks and context switches.
+`perf` calls it for flamegraphs rather than reimplementing it. Its
+`serve-ui` remains better than anything here for exploring a profile.
+
+### criterium, clj-memory-meter, clj-java-decompiler, jvm-alloc-rate-meter
+
+The clojure-goes-fast family. `perf` depends on the first three.
+
+I listed `jvm-alloc-rate-meter` as a duplication and then checked, which
+is the right order and not the one I used elsewhere: it reports
+allocation RATE only (verified, 268 MB/s under load). `capture/poll`
+also samples the heap, and the post-GC heap FLOOR is what the leak
+verdict reads. Not a duplication — the claim was wrong.
+
+### FlowStorm — https://github.com/flow-storm/flow-storm-debugger
+
+Expression-level value recording with time-travel, via **ClojureStorm**,
+a fork of the Clojure compiler. Strictly more powerful than anything in
+`perf.control`, and on a different axis from JFR sampling.
+`perf.flow` is a 60-line bridge and deliberately nothing more.
+
+### CDT — https://github.com/GeorgeJahad/cdt
+
+**The prior art for `perf.control` and `perf.remote`, which I missed on
+the first pass because I searched for profilers rather than debuggers.**
+
+George Jahad, ~2010: a set of Clojure functions using JDI to debug a
+remote VM from a REPL running on *another* VM. Breakpoints, catching
+exceptions, examining frames and locals, stepping, an Emacs front end
+(swank-cdt, later folded into swank-clojure). Its distinguishing feature
+was **evaluating arbitrary Clojure in the lexical scope of a suspended
+remote frame** — still the high-water mark for JDI debugging in Clojure.
+
+Dead: `cdt/cdt` no longer resolves, and ritz went the same way with
+swank. The ideas did not die with the code, and two of them were adopted:
+
+  * **frame locals** on the suspended stack (`perf.control/pending`)
+  * **the separate-process architecture** (`perf.remote`), which is not a
+    stylistic choice. ClassType.invokeMethod must RESUME the suspended
+    thread to run a method; on a self-attached VM the debugger is on that
+    same process and it deadlocks. That single fact is why `perf.control`
+    needed a field-read trick to return a boxed value at all, and why
+    eval-in-frame was impossible there. From a separate process both work
+    — verified: read `amount`/`rate` out of a live frame, box 42 through
+    a real Long.valueOf call, and restart the frame.
+
+What appears NOT to be in CDT: forceEarlyReturn restarts — resuming a
+suspended failure by making the frame return a value. CDT catches,
+inspects and evaluates; I found no mention of continuing with a value.
+
+### coffi — https://github.com/IGJoshua/coffi
+
+`org.suskalo/coffi`, a maintained wrapper over java.lang.foreign,
+described as the fastest FFI available to Clojure. Does not overlap
+`perf.native` (three safety functions, not FFI plumbing) — but it is
+direct prior art for `~/GitHub/lab/src/lab/ffm.clj`, a hand-rolled
+`load-lib`/`downcall`/`call` wrapper. Verified equivalent on the same
+calls:
+
+    (ffi/load-library "/lib64/libc.so.6")
+    (ffi/defcfn strlen "strlen" [::mem/c-string] ::mem/long)
+    (strlen "hello world")   ;=> 11
+
+coffi adds typed layouts, struct serdes, callbacks and static variables.
+`lab.ffm` is untracked, so this is a recommendation, not a rewrite.
+
+### tools.jcmd.jfr — `io.github.bsless/tools.jcmd.jfr`
+
+Invokes JFR from inside the JVM in Clojure. Prior art for the JFR
+plumbing.
+
+## Adjacent
+
+- **Portal / Reveal / REBL** — data browsers. `perf` implements
+  `datafy`/`nav` so these work rather than shipping a UI.
+- **µ/log** — event logging with pluggable publishers; the
+  "instrumentation emits events, transport is separate" shape.
+- **metrics-clojure**, **iapetos** — Dropwizard/Prometheus metrics, for
+  aggregate operational monitoring rather than per-site attribution.
+- **JDK Mission Control**, **VisualVM**, **YourKit**, **JProfiler** —
+  what you should use for serious JFR analysis. `jfr print` and JMC beat
+  anything here for a recorded file.
+
+## So what, if anything, is new
+
+Narrow, and worth stating narrowly:
+
+1. **JFR observations as a queryable fact table with `datafy`/`nav`.** I
+   found no Clojure library that keeps JFR events as data with normalised
+   stacks and lets you query them. Every tool I found reduces them to a
+   fixed report.
+
+2. **`:perf/site` vs `:perf/via`.** Recording both the nearest frame you
+   own and the mechanism where it actually happened. Standard profilers
+   pick one; picking the mechanism gives you `clojure.lang.Var`, and
+   picking your frame hides that the call went megamorphic.
+
+3. **Deoptimisation surfaced per Clojure fn.** HotSpot's `class_check`
+   and `bimorphic_or_optimized_type_check` events, attributed to the
+   function that provoked them. No static analyser can produce this,
+   because it depends on the data you actually ran.
+
+4. **Snapshot as a shippable value.** JFR files already travel; a
+   snapshot is EDN a Clojure REPL can query without JMC.
+
+That is a smaller contribution than the line count suggests, which is the
+honest summary of building first and researching second.

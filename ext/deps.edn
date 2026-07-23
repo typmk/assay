@@ -1,0 +1,9 @@
+;; perf-ext — the things that are NOT "observe a running JVM":
+;;   diagnose  compile-time cost notes   (different input, different lifecycle)
+;;   control   trace + JDI restarts      (a debugger)
+;;   native    FFM safety tiers          (a different domain)
+;;   flow      FlowStorm bridge          (an optional peer tool)
+;; They ride on perf's model but are not needed to use it, and AOT'd into
+;; the always-on jar they were 64 of 196 classes on every JVM start.
+{:paths ["src"]
+ :deps {dev/perf {:local/root "../perf"}}}

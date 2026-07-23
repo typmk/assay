@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Disassemble ONE Clojure fn to x86-64 — the (disassemble 'f) equivalent.
+#
+#   clj-asm 'user$sq.invokeStatic' '(defn sq ^long [^long x] (* x x)) (dotimes [_ 500000] (sq 42))'
+#
+# Clojure compiles (defn sq ...) to class `user$sq`; the body lands in
+# invokeStatic. Hint the args and you get a primitive signature like (J)J —
+# unhinted you get (Ljava/lang/Object;)Ljava/lang/Object; and boxing.
+#
+# The loop matters: HotSpot won't C2-compile until the method is hot, so
+# without enough iterations you disassemble the C1 (profiled) version, which
+# is full of counter increments rather than the code you care about.
+#
+# Note we do NOT pass -XX:+PrintAssembly — that dumps every compiled method
+# in the JVM. CompileCommand=print alone targets just the one you named.
+set -euo pipefail
+PATTERN="${1:?usage: clj-asm <Class.method> <clojure-expr>}"
+EXPR="${2:?usage: clj-asm <Class.method> <clojure-expr>}"
+export LD_LIBRARY_PATH="$HOME/.clojure/dev/lib:${LD_LIBRARY_PATH:-}"
+exec clj -J-XX:+UnlockDiagnosticVMOptions \
+         -J-XX:CompileCommand="print,${PATTERN}" -M -e "$EXPR"
