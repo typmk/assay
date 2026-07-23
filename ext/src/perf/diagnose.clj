@@ -16,8 +16,20 @@
      :evidence   {what was measured}
      :suggestion {:replace s :with s :applicability :machine|:maybe}}
 
-  Prose is a rendering. So is a flymake overlay."
-  (:require [clojure.string :as str]))
+  Prose is a rendering. So is a flymake overlay.
+
+  SCOPE, after perf.code existed: this namespace reads a COMPILED VAR —
+  what signature the compiler actually emitted, available without running
+  anything. `perf.code/notes` reads a FORM as it compiles. Different
+  inputs, different moments, both useful.
+
+  What is gone is `reflection`, which took a form, eval'd it with
+  *warn-on-reflection* bound, and regex'd *err*. That is precisely
+  `perf.code/notes*`, except it found one code instead of two, returned
+  prose instead of a cost, and did not rank. Keeping a worse copy because
+  it was written first is the sunk-cost version of engineering."
+  (:require [clojure.string :as str]
+            [perf.code :as code]))
 
 (def ^:private prim
   {Long/TYPE "long" Double/TYPE "double" Integer/TYPE "int"
@@ -34,9 +46,12 @@
   off invokeStatic without running anything."
   [v]
   (let [obj (if (var? v) @v v)]
-    (->> (.getDeclaredMethods (class obj))
-         (filter #(#{"invokeStatic" "invoke" "invokePrim"} (.getName %)))
-         (map (fn [m]
+;; Hinted, because five reflective calls in the namespace that reports
+    ;; reflection is not a defensible place to leave them.
+    (->> (.getDeclaredMethods ^Class (class obj))
+         (filter #(#{"invokeStatic" "invoke" "invokePrim"}
+                   (.getName ^java.lang.reflect.Method %)))
+         (map (fn [^java.lang.reflect.Method m]
                 (let [ps (vec (.getParameterTypes m)) ret (.getReturnType m)]
                   {:method (.getName m)
                    :params (mapv tname ps)
@@ -61,30 +76,19 @@
        :code :boxed-arithmetic
        :span {:file (:file m) :line (:line m) :col (or (:column m) 1)}
        :message "compiler emitted a boxed body"
+       ;; Cost comes from perf.code/costs, so the number a diagnostic
+       ;; quotes and the number `notes` ranks by cannot drift apart. It
+       ;; used to be a prose string here and a different prose string
+       ;; there, which is how two sources of one truth begin.
+       :cost (code/cost :perf.note/boxed-math)
+       :cost-basis :perf.cost.basis/measured
        :evidence {:emitted (format "(%s)%s" (str/join "," (:params st)) (:returns st))
                   :wanted "primitive signature, e.g. (J)J"
-                  :measured-cost "1.25x — real but small; check reflection first, measured 202x"}
+                  :compare {:perf.note/reflection (code/cost :perf.note/reflection)
+                            :perf.note/boxed-math (code/cost :perf.note/boxed-math)}}
        :suggestion {:replace (str (:name m))
                     :with (str "^long " (:name m))
                     :applicability :maybe}})))
-
-(defn reflection
-  "Does FORM compile to a reflective call? Measured at 202x on this
-  machine — the highest-value compile-time signal in the language, and
-  invisible unless asked for."
-  [form]
-  (let [w (java.io.StringWriter.)]
-    (binding [*warn-on-reflection* true *err* w]
-      (try (eval form) (catch Throwable _ nil)))
-    (let [s (str w)]
-      (when (re-find #"(?i)reflection warning" s)
-        {:severity :warning
-         :code :reflection
-         :message "reflective call — resolved by name at every invocation"
-         :evidence {:warnings (str/split-lines s)
-                    :measured-cost "202x on this machine (1554.93ns -> 7.70ns)"}
-         :suggestion {:with "add a type hint to the target"
-                      :applicability :maybe}}))))
 
 (defn scan
   "Diagnostics for every OPTED-IN fn in NS.
@@ -108,10 +112,11 @@
 (defn render
   "One rendering of a diagnostic, rustc-shaped. Clients that want
   something else (flymake, LSP, JSON) consume the map instead."
-  [{:keys [severity code span message evidence suggestion]}]
+  [{:keys [severity code span message evidence suggestion cost]}]
   (with-out-str
     (printf "%s[%s]: %s\n" (name severity) (name code) message)
     (when (:line span) (printf "  --> %s:%s\n" (or (:file span) "?") (:line span)))
+    (when cost (printf "   = cost: %sx (measured)\n" cost))
     (doseq [[k v] evidence] (printf "   = %s: %s\n" (name k) v))
     (when suggestion
       (printf "help: %s\n" (or (:with suggestion) "")))))
