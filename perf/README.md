@@ -54,9 +54,21 @@ exactly those:
 
 | | what | cost |
 |---|---|---|
-| **stream** | JFR events with stacks → observations | sampled, ~1% |
+| **stream** | JFR events with stacks → observations | sampled, 3.4 µs/event |
 | **poll** | MXBeans over time → heap, alloc rate, GC | negligible |
 | **census** | exact live-object count by class | stop-the-world |
+
+That per-event figure is measured, not estimated: 15,000 real JFR events
+replayed through the normaliser, 3.4 µs each. At JFR's default allocation
+throttle (150 events/s) that is 0.05% of one core; at 3,000 events/s it is
+~1%. It was 110 µs before the reflection and caching work, which would
+have been a third of a core at the same rate — the kind of overhead that
+changes the program you are trying to measure.
+
+The observation log is a ring capped at 200k (`:max-observations`). Past
+that the oldest half is dropped, `:perf/dropped` is non-zero and
+`summary` reports `:perf/coverage :perf.coverage/partial`. Counts stay
+correctly ranked against each other but stop being totals.
 
 Sampled and exact numbers never share a column. JFR's allocation `weight`
 is a *relative* sample weight — measured here, 639 samples came within
@@ -136,8 +148,7 @@ observe a running JVM:
 - `perf.native` — FFM safety: prevent / recover / isolate
 - `perf.flow` — a one-function bridge to FlowStorm
 
-They were 65 of 217 AOT classes loaded on every JVM start before the
-split. `-M:perf-ext` when you want them.
+They are 95 AOT classes that would otherwise load on every JVM start. `-M:perf-ext` when you want them.
 
 ## Status
 
