@@ -10,31 +10,39 @@
 
 (defn of-kind [obs kind] (filterv #(= kind (:perf/kind %)) obs))
 
+(defn- ranked
+  "Group, count, optionally sum, sort descending, truncate.
+
+  Every ranking view in this namespace was this same shape written out
+  again with a different row constructor — `by`, `sites` and `deopts` had
+  three copies of the group/count/agg/sort pipeline between them. ROW
+  turns a [group-key members] pair into the row; everything else is here
+  once."
+  [xs keyfn agg-key limit row]
+  (let [rows (->> (group-by keyfn xs)
+                  (map (fn [[k vs]]
+                         (let [base (row k (count vs))]
+                           (if agg-key
+                             (assoc base :perf/total
+                                    (reduce (fn [a o] (if-let [v (agg-key o)] (+ a v) a)) 0 vs))
+                             base))))
+                  (sort-by #(or (:perf/total %) (:perf/n %)) >))]
+    (vec (if limit (take limit rows) rows))))
+
 (defn by
   "Group OBS by KEY-PATH, count, optionally sum AGG-KEY."
   ([obs key-path] (by obs key-path nil))
   ([obs key-path agg-key]
-   (->> obs
-        (group-by #(get-in % (if (vector? key-path) key-path [key-path])))
-        (map (fn [[k vs]]
-               (cond-> {:perf/key k :perf/n (count vs)}
-                 agg-key (assoc :perf/total (reduce + (keep agg-key vs))))))
-        (sort-by #(or (:perf/total %) (:perf/n %)) >)
-        vec)))
+   (let [path (if (vector? key-path) key-path [key-path])]
+     (ranked obs #(get-in % path) agg-key nil
+             (fn [k n] {:perf/key k :perf/n n})))))
 
 (defn- sites [obs kind agg-key limit]
-  (->> obs
-       (filter #(= kind (:perf/kind %)))
-       (filter #(model/own-frame? (get-in % [:perf/site :perf/fn])))
-       (group-by :perf/site)
-       (map (fn [[site vs]]
-              (cond-> {:perf/fn (:perf/fn site)
-                       :perf/line (:perf/line site)
-                       :perf/n (count vs)}
-                agg-key (assoc :perf/total (reduce + (keep agg-key vs))))))
-       (sort-by #(or (:perf/total %) (:perf/n %)) >)
-       (take limit)
-       vec))
+  (ranked (into [] (comp (filter #(= kind (:perf/kind %)))
+                         (filter #(model/own-frame? (get-in % [:perf/site :perf/fn]))))
+                obs)
+          :perf/site agg-key limit
+          (fn [site n] {:perf/fn (:perf/fn site) :perf/line (:perf/line site) :perf/n n})))
 
 (defn allocation
   "Allocation sites, ranked by SAMPLE COUNT.
@@ -58,33 +66,51 @@
   line you can edit."
   ([obs] (deopts obs 12))
   ([obs n]
-   (->> (of-kind obs :perf.kind/deopt)
-        (group-by (juxt #(get-in % [:perf/site :perf/fn])
-                        #(get-in % [:perf/via :perf/fn])
-                        :perf.deopt/reason))
-        (map (fn [[[site via reason] vs]]
-               {:perf/fn site :perf/via via
-                :perf.deopt/reason reason :perf/n (count vs)}))
-        (sort-by :perf/n >)
-        (take n)
-        vec)))
+   (ranked (of-kind obs :perf.kind/deopt)
+           (juxt #(get-in % [:perf/site :perf/fn])
+                 #(get-in % [:perf/via :perf/fn])
+                 :perf.deopt/reason)
+           nil n
+           (fn [[site via reason] cnt]
+             {:perf/fn site :perf/via via
+              :perf.deopt/reason reason :perf/n cnt}))))
 
 (defn callers
   "Who called FN-NAME, from recorded stacks — a call graph from actual
   execution, not static analysis."
   ([obs fn-name] (callers obs fn-name 10))
   ([obs fn-name n]
-   (->> obs
-        (keep (fn [o]
-                (let [names (model/collapse (map :perf/fn (:perf/stack o)))
-                      idx (first (keep-indexed
-                                  #(when (str/starts-with? %2 (str fn-name)) %1) names))]
-                  (when (and idx (< (inc idx) (count names)))
-                    (nth names (inc idx))))))
-        frequencies
-        (sort-by second >)
-        (take n)
-        (mapv (fn [[f c]] {:perf/caller f :perf/calls c})))))
+   ;; MEASURED 2026-07-23: 100 ms over 20,705 observations, 20x every other
+   ;; query. Two causes, both from building collections to answer a question
+   ;; that needs none. (str fn-name) sat INSIDE the per-frame predicate, so
+   ;; it ran once per frame — 490,000 times for one call. And `collapse`
+   ;; materialised a partition-by of every stack just to read one element
+   ;; of it.
+   ;;
+   ;; Now: one pass per stack, stopping at the first frame above the match.
+   ;; No intermediate sequence exists.
+   ;;
+   ;; Runs of the same name are skipped because Clojure emits
+   ;; invoke -> invokeStatic for every call: without collapsing them, every
+   ;; function appears to call itself. That rule used to live in
+   ;; model/collapse, which had no other caller once this loop absorbed it.
+   (let [prefix (str fn-name)]
+     (->> obs
+          (keep (fn [o]
+                  (let [stack (:perf/stack o)
+                        cnt (count stack)]
+                    (loop [i 0 matched? false prev nil]
+                      (when (< i cnt)
+                        (let [nm (:perf/fn (nth stack i))]
+                          (cond
+                            (= nm prev)   (recur (inc i) matched? prev)
+                            matched?      nm
+                            (str/starts-with? nm prefix) (recur (inc i) true nm)
+                            :else         (recur (inc i) false nm))))))))
+          frequencies
+          (sort-by second >)
+          (take n)
+          (mapv (fn [[f c]] {:perf/caller f :perf/calls c}))))))
 
 (defn rates
   "Aggregated time view over SAMPLES taken every PERIOD-MS.

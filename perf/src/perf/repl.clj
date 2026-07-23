@@ -55,10 +55,17 @@
   travelled here from another machine."
   ([] (summary (snapshot)))
   ([snap]
-   (assoc (query/summary (:perf/observations snap)
-                         (:perf/samples snap)
-                         (:perf/period-ms snap))
-          :perf/host (:host (capability/report)))))
+   (cond-> (assoc (query/summary (:perf/observations snap)
+                                 (:perf/samples snap)
+                                 (:perf/period-ms snap))
+                  :perf/host (:host (capability/report)))
+     ;; If the ring dropped anything, every :perf/n below is a count over
+     ;; the RETAINED window, not the run. Saying so is the difference
+     ;; between a sample and a lie — the numbers are still ranked
+     ;; correctly relative to each other, but they are not totals.
+     (pos? (:perf/dropped snap 0))
+     (assoc :perf/dropped (:perf/dropped snap)
+            :perf/coverage :perf.coverage/partial))))
 
 (defn allocation ([] (allocation 15)) ([n] (query/allocation (obs) n)))
 (defn blocking   ([] (blocking 15))   ([n] (query/blocking (obs) n)))
