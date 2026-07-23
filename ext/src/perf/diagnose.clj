@@ -1,5 +1,6 @@
 (ns perf.diagnose
-  "Diagnostics as structured data with machine-applicable fixes.
+  "Diagnostics for COMPILED VARS, in the same shape as every other fact
+  this library emits.
 
   Copied from rustc, which emits spans, labels and suggestions as JSON and
   lets rustfix, the CLI and rust-analyzer all render the same record. v1
@@ -7,88 +8,68 @@
   ^long/^double...\"` — and then I hand-wrote a second formatter for
   flymake and a third for the REPL. Three renderings of one fact.
 
-  A diagnostic:
+  SCOPE. `perf.code/notes` reads a FORM as it compiles, by capturing what
+  the compiler complained about. This reads a VAR that is already
+  compiled, off its emitted signature, with nothing to run and no source
+  file needed. Different inputs, different moments — a REPL where the code
+  arrived by eval has vars but no source paths, and that is the case this
+  covers. Eastwood covers the source-file case better; see PRIOR-ART.md.
 
-    {:severity   :warning | :note
-     :code       :boxed-arithmetic | :reflection
-     :span       {:file :line :col}
-     :message    short, structured
-     :evidence   {what was measured}
-     :suggestion {:replace s :with s :applicability :machine|:maybe}}
-
-  Prose is a rendering. So is a flymake overlay.
-
-  SCOPE, after perf.code existed: this namespace reads a COMPILED VAR —
-  what signature the compiler actually emitted, available without running
-  anything. `perf.code/notes` reads a FORM as it compiles. Different
-  inputs, different moments, both useful.
-
-  What is gone is `reflection`, which took a form, eval'd it with
-  *warn-on-reflection* bound, and regex'd *err*. That is precisely
-  `perf.code/notes*`, except it found one code instead of two, returned
-  prose instead of a cost, and did not rank. Keeping a worse copy because
-  it was written first is the sunk-cost version of engineering."
+  ONE SCHEMA. This namespace used to return unqualified keys — :severity,
+  :code, :span, :message — while the rest of the library returned
+  qualified ones, which is the exact collision perf.model's docstring
+  argues against at length. It also meant a converter from
+  perf.code/emitted-signature's qualified keys back to unqualified ones,
+  purely to feed its own predicate, and a second rustc-shaped renderer
+  beside perf.code/explain. All three were the same mistake wearing
+  different hats. Now: #:perf.note{...} like everything else, no adapter,
+  and `perf.code/explain` renders these too."
   (:require [clojure.string :as str]
             [perf.code :as code]))
 
-(defn signature
-  "Emitted method signatures for a fn var — delegated to
-  `perf.code/emitted-signature`, which is the same read of the same class.
-  This namespace kept its own copy, with its own primitive-name table and
-  its own five reflective calls."
-  [v]
-  (mapv (fn [m]
-          {:method (:perf.types/method m)
-           :params (mapv str (:perf.types/params m))
-           :returns (str (:perf.types/returns m))
-           :primitive? (and (seq (:perf.types/params m))
-                            (not-any? #(= 'Object %) (:perf.types/params m))
-                            (not= 'Object (:perf.types/returns m)))})
-        (code/emitted-signature v)))
-
 (defn boxing
-  "Diagnostic for a fn var: primitive body or boxed?
+  "Diagnostic for a fn var: primitive body, or boxed?
+
+  Reads `perf.code/types`, which is the same Object-versus-primitive
+  question asked one rung up the ladder. This used to recompute it from a
+  locally-converted copy of the signature.
 
   Returns nil when there is nothing to say — a diagnostic that always
   fires is noise, and noise gets filtered out wholesale."
   [v]
-  (let [m  (meta v)
-        ss (signature v)
-        st (first (filter #(= "invokeStatic" (:method %)) ss))]
-    (when (and st (not (:primitive? st)))
-      {:severity :warning
-       :code :boxed-arithmetic
-       :span {:file (:file m) :line (:line m) :col (or (:column m) 1)}
-       :message "compiler emitted a boxed body"
-       ;; Cost comes from perf.code/costs, so the number a diagnostic
-       ;; quotes and the number `notes` ranks by cannot drift apart. It
-       ;; used to be a prose string here and a different prose string
-       ;; there, which is how two sources of one truth begin.
-       :cost (code/cost :perf.note/boxed-math)
-       :cost-basis :perf.cost.basis/measured
-       :evidence {:emitted (format "(%s)%s" (str/join "," (:params st)) (:returns st))
-                  :wanted "primitive signature, e.g. (J)J"
-                  :compare {:perf.note/reflection (code/cost :perf.note/reflection)
-                            :perf.note/boxed-math (code/cost :perf.note/boxed-math)}}
-       :suggestion {:replace (str (:name m))
-                    :with (str "^long " (:name m))
-                    :applicability :maybe}})))
+  (let [m (meta v)
+        t (code/types @v)]
+    (when (seq (:perf.types/unresolved t))
+      #:perf.note{:code :perf.note/boxed-body
+                  :severity :perf.severity/warning
+                  :span {:perf/file (:file m)
+                         :perf/line (:line m)
+                         :perf/col (or (:column m) 1)}
+                  :message "compiler emitted a boxed body"
+                  ;; Cost comes from perf.code/costs, so the number a
+                  ;; diagnostic quotes and the number `notes` ranks by
+                  ;; cannot drift apart. It used to be a prose string here
+                  ;; and a different prose string there, which is how two
+                  ;; sources of one truth begin.
+                  :cost (code/cost :perf.note/boxed-body)
+                  :cost-basis :perf.cost.basis/measured
+                  :why (get-in code/costs [:perf.note/boxed-body :perf.cost/why])
+                  :emitted (format "(%s)%s"
+                                   (str/join "," (:perf.types/params t))
+                                   (:perf.types/returns t))
+                  :unresolved (:perf.types/unresolved t)
+                  :suggestion #:perf.note{:with "hint the params and return primitive"
+                                          :example (str "(defn ^long " (:name m) " ^long [...] ...)")
+                                          :applicability :perf.note.applicability/maybe}})))
 
 (defn scan
-  "Diagnostics for every OPTED-IN fn in NS.
-
-  USE EASTWOOD INSTEAD when you have source files. Measured side by side
-  it found the same warnings this does, has thirty linters against these
-  two, and is maintained for the job. This scan earns its place only in
-  the case Eastwood cannot reach: already-LOADED vars, with no
-  :source-paths, read from the compiled signature rather than from source
-  — a REPL where the code arrived by eval.
+  "Diagnostics for every OPTED-IN fn in NS, worst cost first.
 
   Opt-in is copied from SBCL, which only emits efficiency notes where you
   wrote (declare (optimize speed)). Most Clojure fns are legitimately
   Object->Object; flagging them all would bury the signal, and an
-  advisory channel that cries wolf gets ignored — which is worse than
-  not having one.
+  advisory channel that cries wolf gets ignored — which is worse than not
+  having one.
 
     (defn ^:perf hot-path ^long [^long n] ...)"
   ([] (scan *ns*))
@@ -96,18 +77,8 @@
    (->> (ns-publics (the-ns ns))
         (keep (fn [[sym v]]
                 (when (and (:perf (meta v)) (fn? @v))
-                  (some-> (boxing v) (assoc :var (symbol (str ns) (str sym)))))))
-        (sort-by #(get-in % [:span :line]))
+                  (some-> (boxing v)
+                          (assoc :perf.note/var (symbol (str ns) (str sym)))))))
+        (sort-by #(vector (- (or (:perf.note/cost %) 0))
+                          (or (get-in % [:perf.note/span :perf/line]) 0)))
         vec)))
-
-(defn render
-  "One rendering of a diagnostic, rustc-shaped. Clients that want
-  something else (flymake, LSP, JSON) consume the map instead."
-  [{:keys [severity code span message evidence suggestion cost]}]
-  (with-out-str
-    (printf "%s[%s]: %s\n" (name severity) (name code) message)
-    (when (:line span) (printf "  --> %s:%s\n" (or (:file span) "?") (:line span)))
-    (when cost (printf "   = cost: %sx (measured)\n" cost))
-    (doseq [[k v] evidence] (printf "   = %s: %s\n" (name k) v))
-    (when suggestion
-      (printf "help: %s\n" (or (:with suggestion) "")))))

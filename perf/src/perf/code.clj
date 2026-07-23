@@ -62,7 +62,16 @@
               #:perf.cost{:factor 1.25
                           :basis :perf.cost.basis/measured
                           :from "primitive vs boxed arithmetic loop"
-                          :why "each intermediate allocates a Long or Double"}})
+                          :why "each intermediate allocates a Long or Double"}
+              ;; Same underlying fact as :boxed-math, seen from the other
+              ;; end: boxed-math is the compiler complaining as it
+              ;; compiles, boxed-body is the signature it went on to emit.
+              ;; perf.diagnose reports this one.
+              :boxed-body
+              #:perf.cost{:factor 1.25
+                          :basis :perf.cost.basis/measured
+                          :from "primitive vs boxed arithmetic loop"
+                          :why "the whole fn takes and returns Object, so every call boxes"}})
 
 (defn cost
   "The measured cost factor for a note code, or nil."
@@ -166,6 +175,8 @@
         (when-let [c (:perf.note/cost n)]
           (printf "   = cost: %sx  (%s)\n" c (name (:perf.note/cost-basis n))))
         (when-let [w (:perf.note/why n)] (printf "   = why: %s\n" w))
+        (when-let [e (:perf.note/emitted n)] (printf "   = emitted: %s\n" e))
+        (when-let [v (:perf.note/var n)] (printf "   = var: %s\n" v))
         (when-let [s (:perf.note/suggestion n)]
           (printf "  help: %s\n        %s\n"
                   (:perf.note/with s) (:perf.note/example s)))
