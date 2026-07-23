@@ -34,10 +34,11 @@
   "Kind-specific values as top-level QUALIFIED keys, merged flat.
   Nesting under :attrs is what you do without namespaces; with them the
   flat form is simpler and Datomic-shaped."
-  [kind e]
+  [kind ^jdk.jfr.consumer.RecordedEvent e]
   (case kind
     :perf.kind/alloc
-    {:perf.alloc/class (try (some-> (.getValue e "objectClass") .getName) (catch Throwable _ nil))
+    {:perf.alloc/class (try (some-> ^jdk.jfr.consumer.RecordedClass (.getValue e "objectClass") .getName)
+                            (catch Throwable _ nil))
      :perf.alloc/weight (try (.getLong e "weight") (catch Throwable _ nil))}
     :perf.kind/block
     {:perf.block/duration-ns (try (.toNanos (.getDuration e)) (catch Throwable _ nil))}
@@ -46,16 +47,37 @@
      :perf.deopt/action (try (.getString e "action") (catch Throwable _ nil))}
     {}))
 
-(defn- start-stream [types tap?]
+;; MEASURED 2026-07-23: a 5s workload produced 15,000 alloc events, each
+;; carrying ~24 frame maps. That is roughly 7 MB/s of retained
+;; observations, unbounded — a profiler that becomes the leak it exists to
+;; find, and the failure mode is an OOM in the process you were debugging.
+;;
+;; So the observation log is a ring: past MAX, the oldest half is dropped.
+;; Halving rather than dropping one-per-event keeps it amortised O(1)
+;; instead of O(n) per event.
+;;
+;; Drops are COUNTED and reported by `describe`, `snapshot` and
+;; `observations-dropped`. A cap that silently discards data would make
+;; every count downstream a quiet lie — "12 samples at this site" has to
+;; mean twelve, or the ranking is fiction.
+(def default-max-observations 200000)
+
+(defn- start-stream [types tap? max-obs]
   (let [obs (atom [])
+        dropped (atom 0)
         rs  (jdk.jfr.consumer.RecordingStream.)]
-    (doseq [t types] (.withStackTrace (.enable rs t)))
+    (doseq [t types] (.withStackTrace ^jdk.jfr.EventSettings (.enable rs ^String t)))
     (doseq [t types]
       (let [kind (event-kinds t)]
         (.onEvent rs t (reify java.util.function.Consumer
                          (accept [_ e]
                            (let [o (model/observation kind e (attrs-for kind e))]
-                             (swap! obs conj o)
+                             (swap! obs (fn [v]
+                                          (if (>= (count v) (long max-obs))
+                                            (let [half (quot (long max-obs) 2)]
+                                              (swap! dropped + half)
+                                              (conj (into [] (subvec v half)) o))
+                                            (conj v o))))
                              ;; tap> is Clojure's standard "send a value
                              ;; somewhere to look at it" channel — one line,
                              ;; and Portal/Reveal/REBL pick it up with no
@@ -63,7 +85,7 @@
                              ;; into a browser is a denial of service.
                              (when tap? (tap> o))))))))
     (.startAsync rs)
-    {:stream rs :obs obs}))
+    {:stream rs :obs obs :dropped dropped :max max-obs}))
 
 (defn- start-poll [period-ms keep]
   (let [ring (atom clojure.lang.PersistentQueue/EMPTY)
@@ -76,16 +98,26 @@
               (let [rt (Runtime/getRuntime)]
                 (loop [prev 0]
                   (when @run
+                    ;; ids re-read each tick: threads come and go, and a
+                    ;; stale array silently stops counting the new ones.
+                    ;; areduce over the long[] rather than (reduce + (map ..))
+                    ;; — that boxed every thread's byte count, once a tick,
+                    ;; forever, in the thread whose job is measuring
+                    ;; allocation.
                     (let [used (- (.totalMemory rt) (.freeMemory rt))
-                          alloc (reduce + (map #(.getThreadAllocatedBytes tmx %)
-                                               (.getAllThreadIds tmx)))]
+                          ^longs ids (.getAllThreadIds tmx)
+                          alloc (areduce ids i acc (long 0)
+                                         (+ acc (.getThreadAllocatedBytes tmx (aget ids i))))
+                          gcn (reduce (fn [^long a ^java.lang.management.GarbageCollectorMXBean g]
+                                        (+ a (.getCollectionCount g)))
+                                      0 gcs)]
                       (swap! ring (fn [q]
                                     (let [q (conj q #:perf{:t (System/currentTimeMillis)
                                                            :heap used
                                                            :alloc-rate (max 0 (- alloc prev))
-                                                           :gc-count (reduce + (map #(.getCollectionCount %) gcs))})]
+                                                           :gc-count gcn})]
                                       (if (> (count q) keep) (pop q) q))))
-                      (Thread/sleep period-ms)
+                      (Thread/sleep (long period-ms))
                       (recur alloc))))))
             "perf-poll")]
     ;; daemon: must never block process exit. v1's non-daemon stream made
@@ -108,31 +140,43 @@
   Object
   (toString [this] (describe this))
   java.io.Closeable
-  (close [this] (some-> stream :stream .close) (some-> poll :run (reset! false))))
+  (close [this]
+    (some-> ^jdk.jfr.consumer.RecordingStream (:stream stream) .close)
+    (some-> poll :run (reset! false))))
+
+(defn observations-dropped
+  "How many observations the ring discarded. Zero unless the cap was hit."
+  [recorder]
+  (if-let [d (get-in recorder [:stream :dropped])] @d 0))
 
 (defn describe [r]
-  (format "#perf/recorder{:observations %d :samples %d :running? %s}"
-          (count (if-let [o (get-in r [:stream :obs])] @o []))
-          (count (if-let [x (get-in r [:poll :ring])] @x []))
-          (nil? (:stopped r))))
+  (let [d (observations-dropped r)]
+    (format "#perf/recorder{:observations %d%s :samples %d :running? %s}"
+            (count (if-let [o (get-in r [:stream :obs])] @o []))
+            (if (pos? d) (format " :dropped %d" d) "")
+            (count (if-let [x (get-in r [:poll :ring])] @x []))
+            (nil? (:stopped r)))))
 
 ;; A capture is a value, so the REPL prints it — and printing it printed
 ;; 123 KB of observations. Values should be printable; that is what a
 ;; print-method is for. The data is still there, behind `observations`.
-(defmethod print-method Recorder [r ^java.io.Writer w] (.write w (describe r)))
+(defmethod print-method Recorder [r ^java.io.Writer w] (.write w ^String (describe r)))
 
 (defn start
   "Begin recording. Returns a RECORDER — a live handle, not a value.
   It is Closeable, so (with-open [r (start)] ...) works.
 
-  opts: {:types [...] :period-ms 500 :keep 240 :tap? false}
+  opts: {:types [...] :period-ms 500 :keep 240 :tap? false
+         :max-observations 200000}
   With :tap? true every observation is tap>'d — Portal, Reveal and REBL
   render them live, with no integration on either side."
   ([] (start {}))
-  ([{:keys [types period-ms keep tap?] :or {period-ms 500 keep 240 tap? false}}]
+  ([{:keys [types period-ms keep tap? max-observations]
+     :or {period-ms 500 keep 240 tap? false}}]
    (cap/require! :jfr)
    (map->Recorder {:started (System/currentTimeMillis)
-                  :stream (start-stream (or types (keys event-kinds)) tap?)
+                  :stream (start-stream (or types (keys event-kinds)) tap?
+                                        (or max-observations default-max-observations))
                   :poll (start-poll period-ms keep)})))
 
 (defn stop
@@ -167,6 +211,7 @@
    :perf/at (System/currentTimeMillis)
    :perf/period-ms (period recorder)
    :perf/observations (observations recorder)
+   :perf/dropped (observations-dropped recorder)
    :perf/samples (samples recorder)})
 
 (defn census

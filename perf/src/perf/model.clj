@@ -74,6 +74,25 @@
   ["java." "jdk." "sun." "clojure." "perf." "perf/"
    "cider." "nrepl." "orchard." "criterium." "malli."])
 
+;; ── name caches ───────────────────────────────────────────────────
+;;
+;; MEASURED 2026-07-23, 13179 alloc events over a 5s workload: normalising
+;; one event cost 182 us, of which demunge alone was 90.8 — half the entire
+;; cost of observing. Across 312,893 frames there were 59 DISTINCT names.
+;; Class and method names come from a small set that stops growing almost
+;; immediately, so both caches below are near-pure-hit after the first
+;; millisecond.
+;;
+;; ConcurrentHashMap, not core/memoize: memoize wraps every call in a deref
+;; plus a swap! on an atom holding a map, which is exactly the contended
+;; write path being avoided. computeIfAbsent locks one bin.
+;;
+;; Bounded, because a JVM emitting genuinely unbounded names (lambda
+;; spinning, heavy runtime codegen) would otherwise make the profiler the
+;; leak it is meant to find. Past the cap both still return correct
+;; answers, just uncached.
+(def ^:private cache-max 50000)
+
 (defn clojure-frame?
   "Does FN-NAME look like a demunged Clojure fn (ns/name)?
   Tests for `/`, not `$`: frames are demunged on the way in, so
@@ -82,47 +101,111 @@
   [fn-name]
   (str/includes? (str fn-name) "/"))
 
+;; A pure predicate over those same names, scanning 11 prefixes each time.
+;; Caching collapses the whole classification to one hash lookup.
+(def ^:private ^java.util.concurrent.ConcurrentHashMap own-cache
+  (java.util.concurrent.ConcurrentHashMap. 512))
+
+(def ^:private own-fn
+  (reify java.util.function.Function
+    (apply [_ s]
+      (Boolean/valueOf
+       (boolean (and (str/includes? ^String s "/")
+                     (not (some #(str/starts-with? ^String s %) noise-prefixes))))))))
+
 (defn own-frame? [fn-name]
   (let [s (str fn-name)]
-    (and (clojure-frame? s)
-         (not (some #(str/starts-with? s %) noise-prefixes)))))
+    (if (< (.size own-cache) cache-max)
+      (.booleanValue ^Boolean (.computeIfAbsent own-cache s own-fn))
+      (and (clojure-frame? s)
+           (not (some #(str/starts-with? s %) noise-prefixes))))))
 
-(defn demunge [cls] (clojure.lang.Compiler/demunge (str cls)))
+(def ^:private ^java.util.concurrent.ConcurrentHashMap demunge-cache
+  (java.util.concurrent.ConcurrentHashMap. 512))
 
-(defn collapse
-  "Collapse runs of equal names. Clojure emits invoke -> invokeStatic for
-  every call, so without this every function appears to call itself."
-  [names]
-  (mapv first (partition-by identity names)))
+(def ^:private demunge-fn
+  (reify java.util.function.Function
+    (apply [_ s] (clojure.lang.Compiler/demunge s))))
+
+(defn demunge [cls]
+  (let [s (str cls)]
+    (if (< (.size demunge-cache) cache-max)
+      (.computeIfAbsent demunge-cache s demunge-fn)
+      (or (.get demunge-cache s) (clojure.lang.Compiler/demunge s)))))
+
+(defn cache-stats
+  "Occupancy of the name caches. Exposed because 'is the cache doing its
+  job' is a question about THIS process, and the honest answer is a
+  number — including when it says the cap has been hit."
+  []
+  #:perf.cache{:demunge (.size demunge-cache)
+               :own (.size own-cache)
+               :max cache-max})
 
 (defn frames
   "Normalise a JFR stack into rows. One row per frame makes stacks a JOIN
   TARGET — 'fns in both allocation and blocking stacks' is a set
-  intersection, not a bespoke report."
-  [st]
+  intersection, not a bespoke report.
+
+  A typed loop over the List with a transient, not map-indexed into vec.
+  This runs once per frame per event — 23.7 frames/event measured — so the
+  lazy seq, its chunk buffer and the boxed index were pure overhead on the
+  hottest path in the library."
+  [^jdk.jfr.consumer.RecordedStackTrace st]
   (when st
-    (vec (map-indexed (fn [d f]
-                        {:perf/depth d
-                         :perf/fn (demunge (.getName (.getType (.getMethod f))))
-                         :perf/line (.getLineNumber f)})
-                      (.getFrames st)))))
+    (let [^java.util.List fs (.getFrames st)
+          n (.size fs)]
+      (loop [i 0 out (transient [])]
+        (if (== i n)
+          (persistent! out)
+          (let [^jdk.jfr.consumer.RecordedFrame f (.get fs i)]
+            (recur (unchecked-inc i)
+                   (conj! out {:perf/depth i
+                               :perf/fn (demunge (.getName (.getType (.getMethod f))))
+                               :perf/line (.getLineNumber f)}))))))))
 
 (defn site
-  "Nearest frame the user owns; falls back to the innermost Clojure frame."
+  "Nearest frame the user owns; falls back to the innermost Clojure frame.
+
+  One pass, not two lazy filters. The fallback used to force a second
+  traversal building a second lazy seq to answer a question the first pass
+  had already seen the answer to."
   [fs]
-  (let [clj (filter #(clojure-frame? (:perf/fn %)) fs)]
-    (or (first (filter #(own-frame? (:perf/fn %)) clj)) (first clj))))
+  (let [^java.util.List v (if (vector? fs) fs (vec fs))
+        n (.size v)]
+    (loop [i 0 fallback nil]
+      (if (== i n)
+        fallback
+        (let [f (.get v i)
+              nm (:perf/fn f)]
+          (if (clojure-frame? nm)
+            (if (own-frame? nm)
+              f
+              (recur (unchecked-inc i) (or fallback f)))
+            (recur (unchecked-inc i) fallback)))))))
+
+(defn- site-ref
+  "A frame reduced to the two keys a site carries. Returns {} for nil so
+  the schema's [:map] holds even when a stack had no usable frame."
+  [f]
+  (if f
+    {:perf/fn (:perf/fn f) :perf/line (:perf/line f)}
+    {}))
 
 (defn observation
   "Build an observation. ATTRS are already-qualified kind-specific keys,
   merged flat rather than nested."
-  [kind e attrs]
+  [kind ^jdk.jfr.consumer.RecordedEvent e attrs]
   (let [fs (frames (.getStackTrace e))]
     (merge {:perf/kind kind
             :perf/t (.toEpochMilli (.getStartTime e))
             :perf/thread (some-> (.getThread e) .getJavaName)
-            :perf/site (select-keys (site fs) [:perf/fn :perf/line])
-            :perf/via (select-keys (first fs) [:perf/fn :perf/line])
+            ;; Built directly, not via select-keys. select-keys reduces over
+            ;; the key vector doing a find and a conj per key, allocating a
+            ;; transient it immediately persists — twice per event, for two
+            ;; keys each, on a map we are already holding.
+            :perf/site (site-ref (site fs))
+            :perf/via (site-ref (first fs))
             :perf/stack fs}
            attrs)))
 
