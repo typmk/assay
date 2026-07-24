@@ -47,19 +47,29 @@
        vec))
 
 (defn codelist
-  "Every method the JIT has compiled, with its tier and code address.
-  Tier 1-3 are C1 (increasing profiling), tier 4 is C2 — so this is the
-  live map of what is hot and how hard it was optimised."
+  "Every method the JIT has compiled, with its compile id and tier.
+  Tier 1-3 are C1 (increasing profiling), tier 4 is C2, tier 0 is
+  interpreted/OSR — so this is the live map of what is hot and how hard it
+  was optimised.
+
+  The line format is HotSpot's own: `<id> <tier> <flags> <method-sig>
+  [<addr-range>]`, and the method is dot-separated Java
+  (java.lang.Byte.toUnsignedInt(B)I), NOT ns/name. An earlier regex
+  assumed ns/name and SILENTLY DROPPED 30% of the list — a partial window
+  passed off as whole, the exact silent-omission this toolkit exists to
+  refuse. Now every line becomes a structured map, or, if it will not
+  parse, passes through as {:perf.jit/raw line}. Nothing vanishes: the
+  fetch is complete, even the parts we could not structure."
   []
   (->> (str/split-lines (str (run :compilerCodelist)))
-       (keep (fn [l]
-               ;; "<addr> <level> <flags> <method> (<size> bytes)"
-               (when-let [[_ addr level method]
-                          (re-find #"^(\S+)\s+(\d+)\s+\S*\s+(\S+::\S+|\S+/\S+)" l)]
-                 #:perf.jit{:address addr
-                            :tier (parse-long level)
-                            :method method})))
-       vec))
+       (remove str/blank?)
+       (mapv (fn [l]
+               (if-let [[_ id tier method]
+                        (re-find #"^\s*(\d+)\s+(-?\d+)\s+\S+\s+(.+?)(?:\s+\[|$)" l)]
+                 #:perf.jit{:id (parse-long id)
+                            :tier (parse-long tier)
+                            :method (str/trim method)}
+                 #:perf.jit{:raw l})))))
 
 (defn directives
   "The JIT control directives currently in effect (what steer! added,
