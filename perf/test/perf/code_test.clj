@@ -125,3 +125,23 @@
   (is (true? (code/watching?)) "on, even with zero notes accrued yet")
   (code/unwatch!)
   (is (false? (code/watching?))))
+
+(deftest notes-parse-source-names-with-colons
+  ;; The bug that only a LIVE nREPL surfaced: the compiler's source name
+  ;; there is "*cider-repl host:127.0.0.1:PORT(clj)*" — colons everywhere.
+  ;; warning-re used [^:] for the file segment, so it matched NO_SOURCE_PATH
+  ;; (every -e test and the suite) but NOTHING in a real REPL, and notes
+  ;; returned [] live while passing every test.
+  (let [w (java.io.StringWriter.)
+        tmp (create-ns (gensym "colon-probe"))]
+    (binding [*warn-on-reflection* true *err* w *ns* tmp]
+      (clojure.core/refer-clojure)
+      (eval '(fn [s] (.length s))))
+    (remove-ns (ns-name tmp))
+    (let [raw (str w)
+          ;; force a colon-laden source name like a live nREPL's
+          faked (clojure.string/replace raw #"warning, [^:]*:"
+                                        "warning, *cider-repl h:127.0.0.1:43623(clj)*:")]
+      (is (re-find #"Reflection warning" faked) "the raw warning is present")
+      (is (= 1 (count (#'perf.code/parse-warnings faked)))
+          "parses a source name containing colons"))))

@@ -123,7 +123,14 @@
   ;; "Reflection warning, NO_SOURCE_PATH:9:50 - reference to field length
   ;;  can't be resolved."
   ;; "Boxed math warning, file.clj:13:48 - call: public static ..."
-  #"(?m)^(Reflection|Boxed math) warning, ([^:]*):(\d+):(\d+) - (.*)$")
+  ;;
+  ;; The file part is GREEDY (.*), not ([^:]*): under a real nREPL the eval
+  ;; source name is "*cider-repl host:127.0.0.1:42621(clj)*" — full of
+  ;; colons — so an [^:] file segment stopped at the first colon and the
+  ;; whole line failed to match. notes returned [] in every live REPL
+  ;; while passing every NO_SOURCE_PATH test. Greedy .* backtracks to let
+  ;; the trailing :line:col: - message anchor, colons in the name and all.
+  #"(?m)^(Reflection|Boxed math) warning, (.*):(\d+):(\d+) - (.*)$")
 
 (def ^:private code-of
   {"Reflection" :perf.note/reflection
