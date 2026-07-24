@@ -102,3 +102,45 @@
   "Drop the directives steer! added, back to the JIT's default policy."
   []
   (str (run :compilerDirectivesClear)))
+
+;; ── timeline: the JIT's compilation history, not its snapshot ──────
+;; codelist is the CURRENT set of compiled methods. This is the SEQUENCE:
+;; every compilation the JIT performed over a workload, with tier and
+;; timestamp — the decisions as they happened. -XX:+LogCompilation is a
+;; startup flag (like native's PrintAssembly), so a fresh JVM runs the
+;; workload and we parse its emitted log.
+
+(defn- unescape [s]
+  (-> s (str/replace "&lt;" "<") (str/replace "&gt;" ">")
+      (str/replace "&apos;" "'") (str/replace "&quot;" "\"") (str/replace "&amp;" "&")))
+
+(defn- attr [tag k]
+  (some-> (second (re-find (re-pattern (str k "='([^']*)'")) tag)) unescape))
+
+(defn timeline
+  "The JIT COMPILATION TIMELINE of a workload: each method the JIT compiled,
+  in order, with its tier (1-4) and timestamp (seconds since VM start).
+  Spawns a fresh JVM with -XX:+LogCompilation, evals DRIVER-FORM (a
+  self-contained hot workload), and parses the log. codelist over TIME."
+  ([] (timeline '(dotimes [i 3000000] (Math/sqrt (double (unchecked-inc i))))))
+  ([driver-form]
+   (let [log (java.io.File/createTempFile "perf-jit" ".log")
+         java (str (System/getProperty "java.home") "/bin/java")
+         ^java.util.List cmd [java "-XX:+UnlockDiagnosticVMOptions" "-XX:+LogCompilation"
+                              (str "-XX:LogFile=" (.getAbsolutePath log))
+                              "-cp" (System/getProperty "java.class.path")
+                              "clojure.main" "-e" (pr-str driver-form)]
+         p (.start (doto (ProcessBuilder. cmd) (.redirectErrorStream true)))]
+     (when-not (.waitFor p 90 java.util.concurrent.TimeUnit/SECONDS)
+       (.destroyForcibly p))
+     (let [text (slurp log)]
+       (.delete log)
+       (->> (re-seq #"<nmethod\b[^>]*>" text)
+            (keep (fn [tag]
+                    (when-let [m (attr tag "method")]
+                      #:perf.jit{:id (some-> (attr tag "compile_id") parse-long)
+                                 :tier (some-> (attr tag "level") parse-long)
+                                 :method (str/replace m #"\s+" " ")
+                                 :stamp (some-> (attr tag "stamp") Double/parseDouble)})))
+            (sort-by :perf.jit/stamp)
+            vec)))))
