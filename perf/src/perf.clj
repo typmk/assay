@@ -46,10 +46,16 @@
   means the same fn works on data that arrived over a socket."
   [r-or-snap]
   (let [snap (if (:perf/observations r-or-snap) r-or-snap (capture/snapshot r-or-snap))]
-    (assoc (query/summary (:perf/observations snap)
-                          (:perf/samples snap)
-                          (:perf/period-ms snap))
-           :perf/host (:host (capability/report)))))
+    (cond-> (assoc (query/summary (:perf/observations snap)
+                                  (:perf/samples snap)
+                                  (:perf/period-ms snap))
+                   :perf/host (:host (capability/report)))
+      ;; surface partial coverage — the facade used to omit this while
+      ;; perf.repl/summary added it, so the recommended non-REPL entry
+      ;; point silently reported dropped-ring totals as if complete.
+      (pos? (:perf/dropped snap 0))
+      (assoc :perf/dropped (:perf/dropped snap)
+             :perf/coverage :perf.coverage/partial))))
 
 (defn capabilities [] (capability/report))
 

@@ -44,6 +44,7 @@
    "perf/weigh"      (fn [{:keys [form args]}] (measure/weigh (read-form form) (read-args args)))
    "perf/fix"        (fn [{:keys [form args]}] (measure/fix (read-form form) (read-args args)))
    "perf/summary"    (fn [_] (repl/summary))
+   "perf/describe"   (fn [_] (query/describe (repl/summary)))
    "perf/allocation" (fn [{:keys [n]}] (repl/allocation (as-int n 15)))
    "perf/blocking"   (fn [{:keys [n]}] (repl/blocking (as-int n 15)))
    "perf/deopts"     (fn [{:keys [n]}] (repl/deopts (as-int n 15)))

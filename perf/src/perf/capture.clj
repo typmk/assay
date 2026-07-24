@@ -71,13 +71,25 @@
       (let [kind (event-kinds t)]
         (.onEvent rs t (reify java.util.function.Consumer
                          (accept [_ e]
-                           (let [o (model/observation kind e (attrs-for kind e))]
-                             (swap! obs (fn [v]
-                                          (if (>= (count v) (long max-obs))
-                                            (let [half (quot (long max-obs) 2)]
-                                              (swap! dropped + half)
-                                              (conj (into [] (subvec v half)) o))
-                                            (conj v o))))
+                           (let [o (model/observation kind e (attrs-for kind e))
+                                 half (quot (long max-obs) 2)
+                                 ;; The drop count is accounted OUTSIDE the
+                                 ;; swap! fn. swap! re-invokes its fn on
+                                 ;; every CAS retry, so a nested
+                                 ;; (swap! dropped + half) inside it
+                                 ;; multiply-counted under contention —
+                                 ;; masked today only because JFR dispatches
+                                 ;; on one thread. swap-vals! gives the
+                                 ;; atomic before/after; a drop shrank the
+                                 ;; vector, so count it exactly once.
+                                 [before after]
+                                 (swap-vals! obs
+                                             (fn [v]
+                                               (if (>= (count v) (long max-obs))
+                                                 (conj (into [] (subvec v half)) o)
+                                                 (conj v o))))]
+                             (when (< (count after) (count before))
+                               (swap! dropped + half))
                              ;; tap> is Clojure's standard "send a value
                              ;; somewhere to look at it" channel — one line,
                              ;; and Portal/Reveal/REBL pick it up with no
@@ -95,19 +107,23 @@
         gcs  (java.lang.management.ManagementFactory/getGarbageCollectorMXBeans)
         th (Thread.
             (fn []
-              (let [rt (Runtime/getRuntime)]
-                (loop [prev 0]
+              ;; ids re-read each tick: threads come and go, and a stale
+              ;; array silently stops counting the new ones. areduce over
+              ;; the long[] rather than (reduce + (map ..)) — that boxed
+              ;; every thread's byte count, once a tick, in the thread
+              ;; whose job is measuring allocation.
+              (let [rt (Runtime/getRuntime)
+                    read-alloc (fn ^long []
+                                 (let [^longs ids (.getAllThreadIds tmx)]
+                                   (areduce ids i acc (long 0)
+                                            (+ acc (.getThreadAllocatedBytes tmx (aget ids i))))))]
+                ;; seed prev with a REAL reading, not 0. Seeded at 0 the
+                ;; first tick reported alloc-rate = cumulative-bytes-since-
+                ;; JVM-start, which inflated peak/mean alloc-rate.
+                (loop [prev (read-alloc)]
                   (when @run
-                    ;; ids re-read each tick: threads come and go, and a
-                    ;; stale array silently stops counting the new ones.
-                    ;; areduce over the long[] rather than (reduce + (map ..))
-                    ;; — that boxed every thread's byte count, once a tick,
-                    ;; forever, in the thread whose job is measuring
-                    ;; allocation.
                     (let [used (- (.totalMemory rt) (.freeMemory rt))
-                          ^longs ids (.getAllThreadIds tmx)
-                          alloc (areduce ids i acc (long 0)
-                                         (+ acc (.getThreadAllocatedBytes tmx (aget ids i))))
+                          alloc (read-alloc)
                           gcn (reduce (fn [^long a ^java.lang.management.GarbageCollectorMXBean g]
                                         (+ a (.getCollectionCount g)))
                                       0 gcs)]

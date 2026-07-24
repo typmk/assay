@@ -414,16 +414,29 @@
   ([form args]
    (let [f (eval form)
          sigs (emitted-signature f)
-         main (or (first (filter #(= "invokePrim" (:perf.types/method %)) sigs))
-                  (first (filter #(= "invokeStatic" (:perf.types/method %)) sigs))
+         obj? #(= 'Object %)
+         unresolved-of (fn [sig]
+                         (cond-> (vec (keep-indexed #(when (obj? %2) %1)
+                                                    (:perf.types/params sig)))
+                           (obj? (:perf.types/returns sig)) (conj :return)))
+         ;; Pick the WORST arity, not the first. A multi-arity fn compiles
+         ;; one invokeStatic per arity; reporting the first hid boxing in
+         ;; the others. Sorting by unresolved-count descending means a fn
+         ;; that boxes in ANY arity is reported boxed.
+         candidates (filter #(#{"invokeStatic" "invokePrim"} (:perf.types/method %)) sigs)
+         main (or (first (sort-by #(- (count (unresolved-of %)))
+                                  (seq (or (seq candidates) sigs))))
                   (first sigs))
          params (:perf.types/params main)
          returns (:perf.types/returns main)
-         obj? #(= 'Object %)
-         unresolved (cond-> (vec (keep-indexed #(when (obj? %2) %1) params))
-                      (obj? returns) (conj :return))
+         unresolved (unresolved-of main)
          ret (when args (apply f args))]
      (cond-> #:perf.types{:emitted sigs
+                          ;; distinct param-counts across all emitted
+                          ;; methods — multi-arity fns emit `invoke` per
+                          ;; arity, not invokeStatic, so counting
+                          ;; candidates alone reported 0.
+                          :arities (count (distinct (map (comp count :perf.types/params) sigs)))
                           :params params
                           :returns returns
                           :unresolved unresolved
@@ -497,6 +510,13 @@
           (try (var-set v (.getRawRoot ^clojure.lang.Var v)) (catch Throwable _ nil)))
         (reset! watch-state prev)
         :watching)))
+
+(defn watching?
+  "Is watch! currently on? Reads the actual state, not the output — a
+  client that inferred on/off from (seq (watched)) could not turn watch
+  OFF until a note had accrued."
+  []
+  (some? @watch-state))
 
 (defn watched
   "Notes accumulated since `watch!`, ranked by mechanism. Cheap to call."

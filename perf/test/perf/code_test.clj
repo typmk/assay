@@ -110,3 +110,18 @@
     (is (:perf.fix/same-result f))
     (is (re-find #"\^long" (:perf.fix/source f)) "hints are visible in the source"))
   (is (nil? (measure/fix '(fn ^long [^long n] (* n 2)) [7])) "nothing to fix -> nil"))
+
+(deftest types-multiarity-does-not-hide-boxing
+  ;; red-team: reporting the first arity hid boxing in the others.
+  (let [t (code/types '(fn ([a] a) ([a b] (+ a b))))]
+    (is (= :perf.types/all-boxed (:perf.types/verdict t))
+        "the boxed 2-arg arity must surface, not be hidden by the 1-arg")
+    (is (>= (:perf.types/arities t) 2) "counts both arities")))
+
+(deftest watching?-reflects-state-not-output
+  ;; red-team: the toggle could not turn OFF when watched was empty.
+  (is (false? (code/watching?)))
+  (code/watch!)
+  (is (true? (code/watching?)) "on, even with zero notes accrued yet")
+  (code/unwatch!)
+  (is (false? (code/watching?))))

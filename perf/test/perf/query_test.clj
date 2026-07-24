@@ -101,3 +101,11 @@
     (is (= 1 (count (:perf.fn/compile hot))) "the reflection note")
     (is (= 2 (get (:perf.fn/runtime hot) :perf.kind/alloc)) "two alloc samples")
     (is (= #{"user/cold" "user/hot"} (set (map :perf.fn/name rows))))))
+
+(deftest callers-matches-by-name-not-prefix
+  ;; red-team: str/starts-with? fabricated phantom callers.
+  (let [obs [{:perf/stack [{:perf/fn "app/foo"} {:perf/fn "app/realcaller"}]}]]
+    (is (= [] (perf.query/callers obs "app/f")) "app/f must NOT match app/foo")
+    (is (= 1 (count (perf.query/callers obs "app/foo"))) "exact match works")
+    (is (= 1 (count (perf.query/callers obs "foo"))) "bare name matches qualified frame")
+    (is (= [] (perf.query/callers obs "realcall")) "no prefix phantom on the caller side")))
