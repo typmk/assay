@@ -54,55 +54,53 @@
                                     ; same value; `fix` hands it back as
                                     ; source you can paste.
 
-  NOTES ARE RANKED BY COST. SBCL prints notes in source order; a hot loop
-  with one reflective call and nine boxed additions reads as ten equal
-  complaints. Reflection measured 202x here and boxing 1.25x, so the
-  reflective call is 160x more worth fixing and sorts first.
+  NOTES ARE RANKED, but by MECHANISM, not by a stored magnitude. SBCL
+  prints notes in source order; a hot loop with one reflective call and
+  nine boxed additions reads as ten equal complaints. Reflection resolves
+  a method by name on every call; boxing allocates per op; reflection is
+  categorically heavier, so it sorts first. That ordering is structural
+  and stable — see `kind-rank`.
 
-  And a table is still a table. `weigh` replaces the remembered constant
-  with a measurement of YOUR form: it derives the alternative from what
-  the compiler disclosed, verifies the rewrite by recompiling until the
-  notes go away, and times both. On one small form that turned 1.25x
-  (table) into 1.08x (measured), which is the point."
+  There is NO stored cost number. An earlier version stamped every note
+  with a remembered 202x / 1.25x tagged :measured — numbers measured once,
+  on this machine, in a past run, and frozen. For any note today those are
+  recalled, not measured. The measured factor for YOUR form is `weigh`'s
+  job: it derives the alternative from what the compiler disclosed,
+  verifies the rewrite by recompiling until the notes go silent, and times
+  both, live. That number is the only measured one and it is never stored."
   (:require [clojure.string :as str]
             [clojure.walk :as walk]
             [perf.capability :as cap]))
 
-;; ── the cost model ────────────────────────────────────────────────
+;; ── note ordering ─────────────────────────────────────────────────
 ;;
-;; SBCL's costs are internal units from its own compiler model. These are
-;; MEASURED multipliers from this machine, which is a different and in one
-;; respect better basis: the number means "this many times slower than the
-;; fixed version", and it came from running both.
+;; This used to be a table of MEASURED magnitudes — reflection 202x,
+;; boxing 1.25x — stamped onto every note with a :cost-basis :measured
+;; tag. But those numbers were measured ONCE, on this machine, in a past
+;; run, and frozen into a def. For any given note today they are recalled,
+;; not measured: a rank-5 constant wearing a rank-1 label, in the tool
+;; built to catch exactly that. Gone.
 ;;
-;; :basis is on every entry because a cost with no provenance is a number
-;; someone made up, and those spread.
+;; What remains is one ordering, and it is STRUCTURAL, not a magnitude.
+;; Reflection resolves a method by name and signature on every call — a
+;; lookup plus an access check. Boxing allocates one small object per
+;; operation. Reflection is categorically heavier by mechanism, stable
+;; across machines, so notes sort reflection first. That is a rank-3
+;; structural claim about how the two work, not "202x".
+;;
+;; The actual factor for YOUR form comes from `weigh`, which runs both the
+;; form and its hinted rewrite and times them. That number is the only
+;; measured one, it is derived live, and it is never stored.
 
-(def costs
-  #:perf.note{:reflection
-              #:perf.cost{:factor 202
-                          :basis :perf.cost.basis/measured
-                          :from "1554.93 ns -> 7.70 ns, this machine"
-                          :why "the method is resolved by NAME at every single call"}
-              :boxed-math
-              #:perf.cost{:factor 1.25
-                          :basis :perf.cost.basis/measured
-                          :from "primitive vs boxed arithmetic loop"
-                          :why "each intermediate allocates a Long or Double"}
-              ;; Same underlying fact as :boxed-math, seen from the other
-              ;; end: boxed-math is the compiler complaining as it
-              ;; compiles, boxed-body is the signature it went on to emit.
-              ;; perf.diagnose reports this one.
-              :boxed-body
-              #:perf.cost{:factor 1.25
-                          :basis :perf.cost.basis/measured
-                          :from "primitive vs boxed arithmetic loop"
-                          :why "the whole fn takes and returns Object, so every call boxes"}})
+(def ^:private kind-order
+  [:perf.note/reflection :perf.note/boxed-math :perf.note/boxed-body])
 
-(defn cost
-  "The measured cost factor for a note code, or nil."
+(defn kind-rank
+  "Ordinal for sorting notes worst-first, by MECHANISM (see kind-order) —
+  not a magnitude. Lower is worse. The measured factor is `weigh`'s job."
   [note-code]
-  (get-in costs [note-code :perf.cost/factor]))
+  (or (first (keep-indexed (fn [i k] (when (= k note-code) i)) kind-order))
+      99))
 
 ;; ── naming ────────────────────────────────────────────────────────
 ;; Used by both the notes rung and the types rung, so it lives above
@@ -199,14 +197,11 @@
                         :perf/line (parse-long line)
                         :perf/col (parse-long col)}
                  :message (str/replace detail #"\.$" "")
-                 ;; cost is a NUMBER with a basis, not prose — kept for
-                 ;; ranking. Everything else on a note is the compiler's
-                 ;; own string (:message), the emitted signature, or the
-                 ;; overloads read off the class. perf adds no explanation
-                 ;; of its own: :why and :suggestion were perf's voice, and
-                 ;; the derived facts already say what they said.
-                 :cost (cost c)
-                 :cost-basis (get-in costs [c :perf.cost/basis])}
+                 ;; No :cost. Everything on a note is the compiler's own
+                 ;; string (:message), the emitted signature, or the
+                 ;; overloads read off the class — derived, not stored. The
+                 ;; measured factor is a `weigh` away, live.
+                 }
       (alternatives detail))))
 
 
@@ -289,7 +284,7 @@
         (refer-clojure)
         (try (eval form) (catch Throwable _ nil)))
       (finally (remove-ns (ns-name tmp))))
-    (vec (sort-by #(- (or (:perf.note/cost %) 0)) (parse-warnings (str w))))))
+    (vec (sort-by #(kind-rank (:perf.note/code %)) (parse-warnings (str w))))))
 
 (defmacro notes
   "Compile-time notes for FORM, ranked by cost. See `notes*`.
@@ -327,8 +322,6 @@
         (when-let [r (seq (:perf.note/refused n))]
           (printf "   = refused: %s\n" (str/join ", " r)))
         (when-let [v (:perf.note/var n)] (printf "   = var: %s\n" v))
-        (when-let [c (:perf.note/cost n)]
-          (printf "   = cost: %sx  (%s)\n" c (name (:perf.note/cost-basis n))))
         (println)))))
 
 ;; ── rungs 0, 2, 3 ─────────────────────────────────────────────────
@@ -726,7 +719,7 @@
       ;; reported one note where unwatch! a moment later reported two —
       ;; the tool under-counting because it asked too early.
       (.flush ^java.io.Writer *err*)
-      (vec (sort-by #(- (or (:perf.note/cost %) 0))
+      (vec (sort-by #(kind-rank (:perf.note/code %))
                     (parse-warnings (str sink)))))
     []))
 

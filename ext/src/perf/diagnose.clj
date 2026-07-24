@@ -58,9 +58,9 @@
                   :emitted (format "(%s)%s"
                                    (str/join "," (:perf.types/params t))
                                    (:perf.types/returns t))
-                  :unresolved (:perf.types/unresolved t)
-                  :cost (code/cost :perf.note/boxed-body)
-                  :cost-basis :perf.cost.basis/measured})))
+                  ;; No stored cost — the signature above IS the fact, and
+                  ;; the measured factor is `perf.code/weigh`'s job, live.
+                  :unresolved (:perf.types/unresolved t)})))
 
 (defn scan
   "Diagnostics for every OPTED-IN fn in NS, worst cost first.
@@ -79,6 +79,6 @@
                 (when (and (:perf (meta v)) (fn? @v))
                   (some-> (boxing v)
                           (assoc :perf.note/var (symbol (str ns) (str sym)))))))
-        (sort-by #(vector (- (or (:perf.note/cost %) 0))
+        (sort-by #(vector (code/kind-rank (:perf.note/code %))
                           (or (get-in % [:perf.note/span :perf/line]) 0)))
         vec)))
