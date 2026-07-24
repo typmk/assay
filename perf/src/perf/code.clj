@@ -18,11 +18,11 @@
   So:
 
     (code/notes '(defn f [s] (.length s)))
-    ;; => [#:perf.note{:code :perf.note/reflection :cost 202 ...}]
+    ;; => [#:perf.note{:code :perf.note/reflection :span {..} :message ..}]
 
     (code/expand '(when x 1))       ; what the macros produced
     (code/types  form [3 4])        ; what it concluded about types
-    (code/notes  form)              ; what it could not do, ranked by cost
+    (code/notes  form)              ; what it could not do, ranked by mechanism
     (code/java   form)              ; the Java it emitted
     (code/bytecode form)            ; the bytecode
 
@@ -246,7 +246,7 @@
 
 (defn notes*
   "Compile FORM with every compiler advisory switched on and return what
-  the compiler could not do, as data, ranked by measured cost.
+  the compiler could not do, as data, ranked by mechanism (kind-rank).
 
   This is the SBCL move, and the mechanism is deliberately dumb: bind
   *warn-on-reflection* and *unchecked-math*, capture *err*, parse. Clojure
@@ -256,7 +256,7 @@
   NOT NEW. Eastwood has had :reflection and :boxed-math linters for years,
   on the same mechanism, and its `lint` already returns maps with file,
   line and column separated. What is kept here is the cost on each note
-  and the ranking by it — Eastwood reports uniformly, with no severity —
+  and the ranking by mechanism — Eastwood reports uniformly, no severity —
   and form granularity, because Eastwood lints namespaces and a ladder
   rung has to take a form. For a whole project, use Eastwood.
 
@@ -291,7 +291,7 @@
     (vec (sort-by #(kind-rank (:perf.note/code %)) (parse-warnings (str w))))))
 
 (defmacro notes
-  "Compile-time notes for FORM, ranked by cost. See `notes*`.
+  "Compile-time notes for FORM, ranked by mechanism. See `notes*`.
 
     (code/notes '(defn f [s] (.length s)))"
   [form]
@@ -314,7 +314,7 @@
       (doseq [n ns]
         ;; Ordered fetch-first, like SBCL's `describe`: the compiler's own
         ;; message, then what it EMITTED and the overloads it took/refused —
-        ;; the raw machine facts — THEN the measured cost, and the canned
+        ;; the raw machine facts — THEN the canned
         ;; `why` prose last of the data lines because it is the only
         ;; interpretation in the note. The fact leads; the explanation
         ;; trails.
@@ -499,7 +499,7 @@
         :watching)))
 
 (defn watched
-  "Notes accumulated since `watch!`, ranked by cost. Cheap to call."
+  "Notes accumulated since `watch!`, ranked by mechanism. Cheap to call."
   []
   (if-let [{:keys [sink]} @watch-state]
     (do

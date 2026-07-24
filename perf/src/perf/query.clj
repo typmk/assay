@@ -94,7 +94,16 @@
    ;; invoke -> invokeStatic for every call: without collapsing them, every
    ;; function appears to call itself. That rule used to live in
    ;; model/collapse, which had no other caller once this loop absorbed it.
-   (let [prefix (str fn-name)]
+   ;; Match by NAME EQUALITY, not prefix. `starts-with?` fabricated
+   ;; phantom callers — a query for "app/f" matched "app/foo", "map"
+   ;; matched "map-indexed". And because a client often sends a BARE name
+   ;; ("handle", from cider-symbol-at-point) while frames are qualified
+   ;; ("user/handle"), also accept a "/name" suffix — which is still exact
+   ;; on the name segment, so "handle" matches "user/handle" but NOT
+   ;; "user/handler".
+   (let [target (str fn-name)
+         suffix (str "/" target)
+         hit? (fn [nm] (or (= nm target) (str/ends-with? nm suffix)))]
      (->> obs
           (keep (fn [o]
                   (let [stack (:perf/stack o)
@@ -105,7 +114,7 @@
                           (cond
                             (= nm prev)   (recur (inc i) matched? prev)
                             matched?      nm
-                            (str/starts-with? nm prefix) (recur (inc i) true nm)
+                            (hit? nm)     (recur (inc i) true nm)
                             :else         (recur (inc i) false nm))))))))
           frequencies
           (sort-by second >)

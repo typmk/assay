@@ -82,7 +82,7 @@
 
 ;; ── weighing the alternative ──────────────────────────────────────
 ;;
-;; `notes` reports cost from a static table: reflection 202x, boxing 1.25x.
+;; `notes` carries no cost number; it ranks by mechanism. A stored
 ;; Those are real measurements, but they are measurements of OTHER code —
 ;; a remembered constant presented next to your form as though it were
 ;; about your form. That is rank 4 wearing a rank 1 costume.

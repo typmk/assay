@@ -122,10 +122,11 @@
   `(perf.code/bytecode ~form))
 
 (defmacro notes
-  "What the compiler could not do, as data, ranked by measured cost —
+  "What the compiler could not do, as data, ranked by mechanism —
   Clojure's answer to SBCL's efficiency notes. See `perf.code/notes`.
+  A note carries no cost number; `measure/weigh` supplies the live factor.
 
     (perf/notes '(defn f [s] (.length s)))
-    ;; => [#:perf.note{:code :perf.note/reflection :cost 202 ...}]"
+    ;; => [#:perf.note{:code :perf.note/reflection :span {...} :message ..}]"
   [form]
   `(perf.code/notes ~form))

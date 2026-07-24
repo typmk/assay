@@ -141,10 +141,12 @@ functions** (one reflective, one boxed, one clean, one both):
 
 What Eastwood's documentation does NOT describe, and what is kept here:
 
-  * **cost on each note, and ranking by it.** Eastwood reports warnings
-    uniformly with no severity or priority. Reflection measured 202x
-    against boxing at 1.25x, so ordering is the difference between one fix
-    and ten.
+  * **ranking by mechanism, and the overload taken-vs-refused.** Eastwood
+    reports warnings uniformly with no severity or priority. `notes` sorts
+    reflection before boxing (structural — reflection resolves by name
+    every call, boxing allocates per op) and, for a boxed call, reads off
+    the class which primitive overloads the compiler REFUSED — a small
+    thing found in no other tool.
   * **`weigh`** — deriving the alternative from what the warning
     disclosed, verifying it by recompiling until the notes go away, and
     timing both. Found nothing doing this.
@@ -224,20 +226,29 @@ plumbing.
 
 Narrow, and worth stating narrowly:
 
-1. **JFR observations as a queryable fact table with `datafy`/`nav`.** I
-   found no Clojure library that keeps JFR events as data with normalised
-   stacks and lets you query them. Every tool I found reduces them to a
-   fixed report.
+1. **JFR observations as Clojure data with `datafy`/`nav`** — PARTIAL,
+   downgraded after a prior-art red-team caught the overclaim. Querying
+   JFR as a table is NOT new: moditect/jfr-analytics maps each event type
+   to a SQL table with joins and streaming
+   (https://github.com/moditect/jfr-analytics), and the JDK's own
+   `jfr query`/`jfr view` (JDK 21+) plus `jfr print --json` do it from the
+   CLI. The earlier claim here — "every tool reduces them to a fixed
+   report" — was false. What survives is narrower: JFR events as Clojure
+   MAPS, in-process from a live RecordingStream, with DEMUNGED Clojure
+   stack frames and `nav` from a frame to its defining var. "Query JFR as
+   Clojure data with Clojure-aware frames" is real; "no tool keeps JFR as
+   data" was not.
 
 2. **`:perf/site` vs `:perf/via`.** Recording both the nearest frame you
-   own and the mechanism where it actually happened. Standard profilers
-   pick one; picking the mechanism gives you `clojure.lang.Var`, and
-   picking your frame hides that the call went megamorphic.
+   own and the mechanism where it happened. A convenience over data every
+   stack-based profiler already carries (async-profiler, JMC keep the full
+   stack) — the contribution is presenting both as first-class keys, not
+   new observability.
 
-3. **Deoptimisation surfaced per Clojure fn.** HotSpot's `class_check`
-   and `bimorphic_or_optimized_type_check` events, attributed to the
-   function that provoked them. No static analyser can produce this,
-   because it depends on the data you actually ran.
+3. **Deoptimisation demunged to the Clojure fn.** JMC already shows
+   `jdk.Deoptimization` events with method and reason; the contribution is
+   demunging to the Clojure fn name and an attribution filter —
+   convenience, not new observability.
 
 4. **Snapshot as a shippable value.** JFR files already travel; a
    snapshot is EDN a Clojure REPL can query without JMC.

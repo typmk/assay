@@ -10,8 +10,8 @@ Observe a running JVM from a Clojure REPL. Facts in, data out.
 ;; => [#:perf{:fn "app/handle-request", :line 6, :n 403} ...]
 
 (r/summary)
-;; => #:perf{:verdict :perf.verdict/floor-rising
-;;           :heap {...} :top-alloc [...] :top-blocked [...]}
+;; => #:perf{:samples .. :verdict :perf.verdict/floor-rising
+;;           :perf.heap/floor-mb .. :top-alloc [...] :top-blocked [...]}
 ```
 
 Everything returns plain maps with qualified keys. There is no UI, no
@@ -21,10 +21,12 @@ watching beyond a REPL.
 ## Why it exists
 
 Clojure has excellent profiling tools — see [PRIOR-ART.md](PRIOR-ART.md),
-which is not a formality; most of what this does has been done. What was
-missing for me was a **queryable fact table**: JFR already emits typed
-events with stack traces, and every tool I found reduced them to a fixed
-report. Fixed reports throw away every question you did not anticipate.
+which is not a formality; most of what this does has been done, including
+querying JFR as a table (jfr-analytics; the JDK's own `jfr query`/`jfr
+view`). What those give you is SQL rows or a CLI view; what was missing
+for me was JFR events as **Clojure data** — maps with demunged Clojure
+frames, `datafy`/`nav` to the defining var, queried in-process — so a
+profile composes with the rest of the Clojure data ecosystem.
 
 So: one recorder, observations as data, views as queries.
 
@@ -58,12 +60,11 @@ exactly those:
 | **poll** | MXBeans over time → heap, alloc rate, GC | negligible |
 | **census** | exact live-object count by class | stop-the-world |
 
-That per-event figure is measured, not estimated: 15,000 real JFR events
-replayed through the normaliser, 3.4 µs each. At JFR's default allocation
-throttle (150 events/s) that is 0.05% of one core; at 3,000 events/s it is
-~1%. It was 110 µs before the reflection and caching work, which would
-have been a third of a core at the same rate — the kind of overhead that
-changes the program you are trying to measure.
+That per-event figure comes from an A/B on ~15k real JFR events (commit
+94980a9): roughly 3 µs/event after the reflection-and-caching work, down
+from ~110 µs before — a ~30x reduction. Rerun the A/B for a current
+number on your machine; the figure here is illustrative, not a live
+guarantee, and the exact event count and microseconds vary by run.
 
 The observation log is a ring capped at 200k (`:max-observations`). Past
 that the oldest half is dropped, `:perf/dropped` is non-zero and
@@ -132,18 +133,18 @@ unranked, and only if you remembered to bind them. So:
 
 ```clojure
 (code/notes '(defn g [a b s] (+ (* a b) (.length s))))
-;; => [#:perf.note{:code :perf.note/reflection :cost 202   :span {...}}
-;;     #:perf.note{:code :perf.note/boxed-math :cost 1.25  :span {...}}
-;;     #:perf.note{:code :perf.note/boxed-math :cost 1.25  :span {...}}]
+;; => [#:perf.note{:code :perf.note/reflection :span {...} :message "..." :took ... :refused ...}
+;;     #:perf.note{:code :perf.note/boxed-math :span {...} :message "..." :took ... :refused ...}
+;;     #:perf.note{:code :perf.note/boxed-math :span {...} ...}]
 ```
 
-**Ranked by measured cost, worst first** — which SBCL does not do. It
-prints notes in source order, so one reflective call and nine boxed
-additions read as ten equal complaints. Reflection measured 202× here and
-boxing 1.25×, so the reflective call is the only one worth your morning.
-Costs live in `perf.code/costs` with their basis attached, and
-`perf.diagnose` reads the same map, so the number a diagnostic quotes and
-the number `notes` sorts by cannot drift apart.
+**Ranked by MECHANISM, worst first** — which SBCL does not do (it prints
+in source order, so one reflective call and nine boxed additions read as
+ten equal complaints). Reflection resolves a method by name on every
+call; boxing allocates per op; reflection is categorically heavier, so it
+sorts first — a structural claim (`kind-rank`), not a stored magnitude. A
+note carries NO cost number. For the measured factor on your actual form,
+`measure/weigh` runs both paths and times them, live.
 
 Compilation happens in a throwaway namespace — inspecting a `defn` should
 not define it in yours.
@@ -192,7 +193,7 @@ observe a running JVM:
 - `perf.native` — FFM safety: prevent / recover / isolate
 - `perf.flow` — a one-function bridge to FlowStorm
 
-They are 95 AOT classes that would otherwise load on every JVM start. `-M:perf-ext` when you want them.
+They are the ext AOT classes that would otherwise load on every JVM start. `-M:perf-ext` when you want them.
 
 ## Status
 
