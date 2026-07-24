@@ -356,6 +356,21 @@
   [form]
   `(clojure.walk/macroexpand-all '~form))
 
+(defn expand-steps*
+  "STEP the macro phase: one macroexpand-1 at a time, top-level only, so
+  you watch a form unfold rather than see the fully-expanded result at
+  once. `expand` is the snapshot; this is the ladder's first STEPPER.
+
+  Returns the sequence of forms, each one macroexpand-1 past the last,
+  until a fixed point. (when x y) -> (if x (do y)) is one visible step;
+  deeper macros show as successive steps."
+  [form]
+  (loop [f form steps [form]]
+    (let [e (macroexpand-1 f)]
+      (if (identical? e f) steps (recur e (conj steps e))))))
+
+(defmacro expand-steps [form] `(expand-steps* '~form))
+
 (defmacro java
   "Rung 2 — the Java the Clojure compiler emitted. Where reflection and
   boxing become visible as code rather than as a warning."
