@@ -388,6 +388,35 @@
                       :rewrite rewrite}))))))
 
 
+(defn cost
+  "Absolute cost of FN-FORM called with ARGS: bytes and ns PER CALL, measured
+  through the SAME direct-arity driver weigh uses — no apply-boxing (a
+  primitive-hinted param keeps its invokePrim path), the result sunk so a
+  strict body's allocation is counted and a zero-alloc primitive reads zero,
+  the sample pool jittered so HotSpot cannot constant-fold. This is the ONE
+  honest single-form cost primitive; do not hand-roll another (an earlier
+  #(apply f args) thunk added a ~120 B ChunkedSeq floor to every form).
+
+  ns comes from bench-form (200k-iteration warmup → C2 steady state), so
+  bytes and ns are read in the SAME regime. QUICK? skips the timed pass
+  (bytes only) for callers that must be cheap.
+
+  A LAZY return is NOT silently realised — forcing it would count realisation
+  the caller has not asked for. Instead :perf.cost/lazy? flags it, so a
+  measured `(map * a b)` reports honestly that the number is construction
+  cost, not the traversal."
+  ([fn-form args] (cost fn-form args {}))
+  ([fn-form args {:keys [quick? reps] :or {reps 200000}}]
+   (let [samples (->samples args)
+         ret     (apply (eval fn-form) (first samples))     ; type the sink
+         sink    (sink-for ret)
+         lazy?   (and (instance? clojure.lang.IPending ret)
+                      (not (realized? ^clojure.lang.IPending ret)))
+         bytes   (alloc-per-call fn-form samples sink)]
+     (cond-> #:perf.cost{:bytes bytes :sink sink}
+       lazy?        (assoc :perf.cost/lazy? true)
+       (not quick?) (assoc :perf.cost/ns (bench-form fn-form samples reps sink))))))
+
 ;; ── applying it ───────────────────────────────────────────────────
 
 (defn fix

@@ -32,5 +32,5 @@ build () {                       # dir  jar  min-classes  ns...
   echo "$jar: $n classes, $(stat -c%s "$jar") bytes"
 }
 
-build perf perf.jar 100 perf.model perf.capability perf.capture perf.query perf.code perf.measure perf.range perf.forms perf.repl perf
+build perf perf.jar 100 perf.model perf.capability perf.capture perf.query perf.code perf.measure perf.range perf.forms perf.repl perf.explain perf
 build ext  perf-ext.jar 40 perf.diagnose perf.control perf.native perf.flow perf.trace perf.remote perf.jit

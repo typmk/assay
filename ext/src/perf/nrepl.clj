@@ -25,6 +25,7 @@
             [nrepl.transport :as transport]
             [perf.code :as code]
             [perf.diagnose :as diagnose]
+            [perf.explain :as explain]
             [perf.forms :as forms]
             [perf.measure :as measure]
             [perf.query :as query]
@@ -48,6 +49,10 @@
    ;; its own structure and rank them cheapest-synonym-first. Powers the
    ;; :perf.note/writing editor surface (gna-perf-writing).
    "perf/writing"    (fn [{:keys [form args]}] (forms/discover (read-form form) (read-args args)))
+   ;; the spine: one subject, four oracles. explain = full reading (structure/
+   ;; cost/type/outcome + blind? verdict); summary = the compile-only eldoc glance.
+   "perf/explain"    (fn [{:keys [form args]}] (explain/explain (read-form form) (read-args args)))
+   "perf/summary-of" (fn [{:keys [form args]}] (explain/summary (read-form form) (read-args args)))
    "perf/summary"    (fn [_] (repl/summary))
    "perf/describe"   (fn [_] (query/describe (repl/summary)))
    "perf/allocation" (fn [{:keys [n]}] (repl/allocation (as-int n 15)))
