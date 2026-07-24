@@ -28,3 +28,15 @@
 (deftest branch-refinement
   ;; convex hull, sound but looser than SBCL's disjoint union — documented.
   (is (:perf.range/sound (d '(if (> x 5) x 0) '{x [0 10]}))))
+
+(deftest union-keeps-branches-disjoint
+  (testing "if-branches stay disjoint (SBCL's (OR ...)) not convex-hulled"
+    (let [r (rng/derive '(if (> x 5) x 0) '{x [0 10]})]
+      (is (= [[0 0] [6 10]] (:perf.range/union r)))
+      (is (= [0 10] (:perf.range/derived r)))
+      (is (true? (:perf.range/union-sound r)))))
+  (testing "nested branches -> multiple disjoint bands"
+    (is (= [[-10 -10] [0 100] [200 200]]
+           (:perf.range/union (rng/derive '(if (< x 0) -10 (if (> x 100) 200 x)) '{x [-50 300]})))))
+  (testing "straight-line reports no union (single interval), backward-compat"
+    (is (nil? (:perf.range/union (rng/derive '(+ (* x 2) 1) '{x [0 10]}))))))

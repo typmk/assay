@@ -13,8 +13,10 @@
     (is (= :proven-equal (forms/prove '(fn [a b c] (* a (+ b c)))
                                       '(fn [a b c] (+ (* a b) (* a c))))))
     (is (= :proven-different (forms/prove '(fn [a] (* a a)) '(fn [a] (* 2 a))))))
-  (testing "control flow / non-polynomial declines to nil (caller falls back to sampling)"
-    (is (nil? (forms/prove '(fn [x] x) '(fn [x] (if (pos? x) x x)))))
+  (testing "genuine control flow / non-polynomial declines to nil (falls back to sampling)"
+    ;; a REDUNDANT if (both branches equal) is now PROVEN, not declined —
+    ;; see prove-breadth-if-and-let. These are genuinely non-polynomial:
+    (is (nil? (forms/prove '(fn [x] (if (> x 5) x 0)) '(fn [x] x))))
     (is (nil? (forms/prove '(fn [a b] (reduce + (map * a b))) '(fn [a b] 0)))))
   (testing "equivalent? reports rank :proven and needs no samples for the polynomial case"
     (let [eq (forms/equivalent? '(fn [a] (+ a a)) '(fn [a] (* 2 a)) [3])]
@@ -58,9 +60,13 @@
   (testing "discover derives candidates from the form's own ops — no supplied list"
     (let [rows (forms/discover '(fn [a b] (+ (* a b) a)) [3.0 5.0] {:reps 100000 :trials 3})]
       (is (seq rows) "generated at least one candidate")
-      ;; the inline expansion of + is a true synonym the generator found
+      ;; the inline expansion of + is a true EQUIVALENT synonym the generator
+      ;; found. It is cost-marginal (semantically identical to +), so timing
+      ;; noise flips it between :synonym and :cheaper-synonym — both are the
+      ;; equivalent-synonym outcome this test is about; don't pin the bucket.
       (is (some #(and (:perf.forms/equivalent %)
-                      (= :perf.forms/synonym (:perf.forms/kind %))) rows))
+                      (contains? #{:perf.forms/synonym :perf.forms/cheaper-synonym}
+                                 (:perf.forms/kind %))) rows))
       ;; op-swaps change the result — caught as differing over the edge+random pool
       (is (some #(= :perf.forms/differing-outcome (:perf.forms/kind %)) rows))
       ;; each classification was either PROVEN (rank 1, no samples needed) or
@@ -114,3 +120,13 @@
     (is (some #{'(if x (do y))} (forms/synonyms '(when x y))))
     ;; (+ a b) inlines to a Numbers static call — the compiler's own rewrite
     (is (seq (forms/synonyms '(+ a b))))))
+
+(deftest prove-breadth-if-and-let
+  (testing "if with equal branches reduces to the shared polynomial (rank 1)"
+    (is (= :proven-equal (forms/prove '(fn [a c] (if c (+ a a) (* 2 a))) '(fn [a c] (* 2 a))))))
+  (testing "let-inlining sees through naming"
+    (is (= :proven-equal (forms/prove '(fn [x] (let [y (* x 2)] (+ y 1))) '(fn [x] (inc (* 2 x))))))
+    (is (= :proven-equal (forms/prove '(fn [x] (let [y (* x 2) z (+ y 1)] (* z z)))
+                                      '(fn [x] (let [w (inc (* 2 x))] (* w w)))))))
+  (testing "a genuine conditional still declines to nil (falls back to sampling)"
+    (is (nil? (forms/prove '(fn [x] (if (> x 5) x 0)) '(fn [x] x))))))

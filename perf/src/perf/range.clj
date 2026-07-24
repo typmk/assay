@@ -65,68 +65,102 @@
 (defn- clamp-hi [[lo hi] h] [lo (mn hi h)])
 (defn- clamp-lo [[lo hi] l] [(mx lo l) hi])
 
-(defn- refine [env test then?]
+;; ── union domain: a value is a SET of disjoint intervals ──────────
+;; SBCL derives (if (> x 5) x 0) :: (OR 0 (INTEGER 6 10)) — it keeps the two
+;; branch results DISJOINT instead of convex-hulling them to [0 10]. This
+;; does the same: the abstract value is a normalised vector of disjoint
+;; intervals. `if` unions the branches; every other op distributes over the
+;; set (cross-product then normalise). `interval` still returns the hull for
+;; the common single-interval case and backward compatibility; the disjoint
+;; set surfaces as derive's :perf.range/union.
+
+(def ^:private top-set [top])
+(defn- empty-iv? [[lo hi]] (> lo hi))
+
+(defn- normalize
+  "Sorted, overlap-merged, empty-dropped set of intervals."
+  [ivs]
+  (->> (remove empty-iv? ivs)
+       (sort-by first)
+       (reduce (fn [acc [lo hi]]
+                 (if (and (seq acc) (<= lo (second (peek acc))))
+                   (conj (pop acc) [(first (peek acc)) (mx hi (second (peek acc)))])
+                   (conj acc [lo hi])))
+               [])))
+
+(defn- hull [ivs]
+  (if (empty? ivs) top [(apply mn (map first ivs)) (apply mx (map second ivs))]))
+
+(defn- lift1 [iop] (fn [s] (normalize (map iop s))))
+(defn- lift2 [iop] (fn [s1 s2] (normalize (for [i1 s1 i2 s2] (iop i1 i2)))))
+
+(defn- refine
+  "Clamp the tested symbol's interval SET in each branch's env."
+  [env test then?]
   (if-not (and (seq? test) (= 3 (count test)))
     env
     (let [[op a b] test
           [sym k] (cond (and (symbol? a) (number? b)) [a b]
                         (and (symbol? b) (number? a)) [b a]
                         :else [nil nil])
-          ;; normalise so the symbol is on the left; flip op if it was right
           op (if (and (symbol? b) (number? a))
                ({'< '> '> '< '<= '>= '>= '<=} op op) op)]
       (if (or (nil? sym) (not (contains? env sym)))
         env
-        (let [iv (env sym)
-              op (if then? op ({'< '>= '> '<= '<= '> '>= '< '= '=} op op))]
-          (assoc env sym
-                 (case op
-                   <  (clamp-hi iv (dec k))
-                   <= (clamp-hi iv k)
-                   >  (clamp-lo iv (inc k))
-                   >= (clamp-lo iv k)
-                   =  (if then? [k k] iv)
-                   iv)))))))
+        (let [op (if then? op ({'< '>= '> '<= '<= '> '>= '< '= '=} op op))
+              clamp (fn [iv]
+                      (case op
+                        <  (clamp-hi iv (dec k))
+                        <= (clamp-hi iv k)
+                        >  (clamp-lo iv (inc k))
+                        >= (clamp-lo iv k)
+                        =  (if then? [k k] iv)
+                        iv))]
+          (assoc env sym (normalize (map clamp (env sym)))))))))
 
-(defn- union [[a b] [c d]] [(mn a c) (mx b d)])
-
-(defn interval
-  "Derive the interval of FORM given ENV, a map of symbol -> [lo hi]."
+(defn- intervals
+  "The disjoint interval SET of FORM. ENV maps symbol -> interval-set."
   [form env]
   (cond
-    (number? form) (let [n (->long form)] [n n])
-    (symbol? form) (get env form top)
-    (not (seq? form)) top
+    (number? form) (let [n (->long form)] [[n n]])
+    (symbol? form) (get env form top-set)
+    (not (seq? form)) top-set
     :else
     (let [[op & args] form
-          iv #(interval % env)]
+          iv #(intervals % env)]
       (case op
-        + (reduce iadd [0 0] (map iv args))
-        - (if (= 1 (count args)) (isub [0 0] (iv (first args)))
-              (reduce isub (iv (first args)) (map iv (rest args))))
-        * (reduce imul [1 1] (map iv args))
-        inc (iadd (iv (first args)) [1 1])
-        dec (isub (iv (first args)) [1 1])
-        abs (iabs (iv (first args)))
-        quot (iquot (iv (first args)) (iv (second args)))
-        mod (imod (iv (first args)) (iv (second args)))
-        min (reduce (fn [[a b] [c d]] [(mn a c) (mn b d)]) (map iv args))
-        max (reduce (fn [[a b] [c d]] [(mx a c) (mx b d)]) (map iv args))
+        + (reduce (lift2 iadd) [[0 0]] (map iv args))
+        - (if (= 1 (count args)) ((lift2 isub) [[0 0]] (iv (first args)))
+              (reduce (lift2 isub) (iv (first args)) (map iv (rest args))))
+        * (reduce (lift2 imul) [[1 1]] (map iv args))
+        inc ((lift1 #(iadd % [1 1])) (iv (first args)))
+        dec ((lift1 #(isub % [1 1])) (iv (first args)))
+        abs ((lift1 iabs) (iv (first args)))
+        quot ((lift2 iquot) (iv (first args)) (iv (second args)))
+        mod ((lift2 imod) (iv (first args)) (iv (second args)))
+        min (reduce (lift2 (fn [[a b] [c d]] [(mn a c) (mn b d)])) (map iv args))
+        max (reduce (lift2 (fn [[a b] [c d]] [(mx a c) (mx b d)])) (map iv args))
         if (let [[t then else] args]
-             (union (interval then (refine env t true))
-                    (interval else (refine env t false))))
+             (normalize (concat (intervals then (refine env t true))
+                                (intervals else (refine env t false)))))
         do (iv (last args))
         let* (let [[binds & body] args
-                   env' (reduce (fn [e [s v]] (assoc e s (interval v e)))
+                   env' (reduce (fn [e [s v]] (assoc e s (intervals v e)))
                                 env (partition 2 binds))]
-               (interval (last body) env'))
+               (intervals (last body) env'))
         let  (let [[binds & body] args
-                   env' (reduce (fn [e [s v]] (assoc e s (interval v e)))
+                   env' (reduce (fn [e [s v]] (assoc e s (intervals v e)))
                                 env (partition 2 binds))]
-               (interval (last body) env'))
-        ;; loops and everything else: widen to TOP (SBCL also gave up the
-        ;; exact bound on a dotimes-sum, returning merely non-negative).
-        top))))
+               (intervals (last body) env'))
+        top-set))))
+
+(defn- lift-env [env] (into {} (map (fn [[s iv]] [s [iv]])) env))
+
+(defn interval
+  "The interval (convex HULL) of FORM given ENV (symbol -> [lo hi]). For the
+  disjoint union — SBCL's (OR ...) — see derive's :perf.range/union."
+  [form env]
+  (hull (intervals form (lift-env env))))
 
 ;; ── verify by sweep ───────────────────────────────────────────────
 
@@ -152,10 +186,17 @@
 
     (derive '(+ (* x 2) 1) '{x [0 10]})
     ;; => {:perf.range/derived [1 21] :perf.range/observed [1 21]
-    ;;     :perf.range/sound true}"
+    ;;     :perf.range/sound true}
+
+  When branches keep the result DISJOINT, :perf.range/union carries the
+  SBCL-style (OR ...) set that the single :derived hull flattens:
+
+    (derive '(if (> x 5) x 0) '{x [0 10]})
+    ;; => {:perf.range/derived [0 10] :perf.range/union [[0 0] [6 10]] ...}"
   [form env]
   (let [form (walk/macroexpand-all form)
-        [dlo dhi :as derived] (interval form env)
+        rs (intervals form (lift-env env))
+        [dlo dhi :as derived] (hull rs)
         f (eval (list 'fn (vec (keys env)) form))
         pts (sample-points env)
         outs (keep (fn [pt] (try (double (apply f (map pt (keys env))))
@@ -164,7 +205,12 @@
         [olo ohi] (if (seq outs) [(apply min outs) (apply max outs)] [nil nil])]
     (cond-> #:perf.range{:derived (mapv ->long derived)
                          :top? (top? derived)}
+      (> (count rs) 1)
+      (assoc :perf.range/union (mapv (fn [[lo hi]] [(->long lo) (->long hi)]) rs))
       (seq outs)
       (assoc :perf.range/observed [(->long olo) (->long ohi)]
              :perf.range/sound (and (<= dlo olo) (<= ohi dhi))
+             ;; tighter: does each observed point fall in SOME union interval?
+             :perf.range/union-sound
+             (every? (fn [o] (some (fn [[lo hi]] (<= lo o hi)) rs)) outs)
              :perf.range/samples (count outs)))))

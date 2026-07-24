@@ -42,7 +42,8 @@
 
   Add an outcome rule to `prove`, a generator to `discover`, or a cost
   dimension to `weigh` — everything else composes those three."
-  (:require [perf.measure :as measure]))
+  (:require [perf.measure :as measure]
+            [clojure.walk :as walk]))
 
 (defn- spread-val
   "A value that SWEEPS the input space by MAGNITUDE, not a perturbation near
@@ -95,7 +96,7 @@
 ;; Anything with control flow, division, or an unknown op reduces to nil and
 ;; the caller falls back to observational equivalence, honestly rank 2.
 
-(declare canon sample-equiv)
+(declare canon sample-equiv poly=?)
 
 (defn- fn-body
   "The (single) body expr of a fn-form; a bare expression is returned
@@ -132,24 +133,32 @@
     (number? form) {{} form}
     (symbol? form) {{form 1} 1}
     (seq? form)
-    (let [[op & args] form
-          ps (map canon args)]
-      (when (every? some? ps)
-        (case op
-          + (apply poly-add {} ps)
-          - (cond (empty? ps) nil
-                  (= 1 (count ps)) (poly-neg (first ps))
-                  :else (apply poly-add (first ps) (map poly-neg (rest ps))))
-          * (reduce poly-mul {{} 1} ps)
-          / (when (seq ps)
-              ;; (/ num d1 d2 ...) — divide only by constant divisors
-              (reduce (fn [acc d]
-                        (when-let [c (and acc (constant-poly d))]
-                          (when-not (zero? c) (poly-scale acc (/ 1 c)))))
-                      (first ps) (rest ps)))
-          inc (poly-add (first ps) {{} 1})
-          dec (poly-add (first ps) {{} -1})
-          nil)))
+    (let [[op & args] form]
+      (case op
+        ;; if BOTH branches canonicalise to the same polynomial, the
+        ;; conditional equals that polynomial regardless of the (pure,
+        ;; total) test — a sound reduction that lets prove see through a
+        ;; redundant branch, e.g. (if c (+ a a) (* 2 a)) ≡ (* 2 a). The
+        ;; test itself is not polynomial and is deliberately not canon'd.
+        (if) (let [[_ t e] args ct (canon t) ce (canon e)]
+               (when (and ct ce (poly=? ct ce)) ct))
+        ;; everything else: canon all args, then combine
+        (let [ps (map canon args)]
+          (when (every? some? ps)
+            (case op
+              + (apply poly-add {} ps)
+              - (cond (empty? ps) nil
+                      (= 1 (count ps)) (poly-neg (first ps))
+                      :else (apply poly-add (first ps) (map poly-neg (rest ps))))
+              * (reduce poly-mul {{} 1} ps)
+              / (when (seq ps)
+                  (reduce (fn [acc d]
+                            (when-let [c (and acc (constant-poly d))]
+                              (when-not (zero? c) (poly-scale acc (/ 1 c)))))
+                          (first ps) (rest ps)))
+              inc (poly-add (first ps) {{} 1})
+              dec (poly-add (first ps) {{} -1})
+              nil)))))
     :else nil))
 
 (defn- poly=?
@@ -161,10 +170,25 @@
     (and (= (set (keys a)) (set (keys b)))
          (every? (fn [m] (== (a m) (b m))) (keys a)))))
 
+(defn- inline-lets
+  "Substitute let/let* bindings into the body so canon sees through naming:
+  (let [y (* x 2)] (+ y 1)) => (+ (* x 2) 1). Sound for the pure fragment —
+  let is just naming, and duplicating a pure binding changes nothing."
+  [form]
+  (cond
+    (and (seq? form) (#{'let 'let*} (first form)))
+    (let [[_ binds & body] form
+          env (reduce (fn [e [s v]] (assoc e s (walk/postwalk-replace e (inline-lets v))))
+                      {} (partition 2 binds))]
+      (walk/postwalk-replace env (inline-lets (last body))))
+    (seq? form) (map inline-lets form)
+    :else form))
+
 (defn prove
   "Try to PROVE the relationship of two forms algebraically, over the
-  polynomial fragment. :proven-equal / :proven-different are rank 1; nil
-  means outside the fragment — fall back to sampling.
+  polynomial fragment (+ - * / inc dec, plus if with equal branches and let,
+  via inlining). :proven-equal / :proven-different are rank 1; nil means
+  outside the fragment — fall back to sampling.
 
   SCOPE, stated precisely: this proves equality over the REAL/rational ring.
   For integer/long arguments that is bit-exact — (+ a a) and (* 2 a) compute
@@ -177,7 +201,8 @@
   it refuses to reassociate floats. For bit-exactness on floats, the
   observational check still applies."
   [form-a form-b]
-  (let [pa (canon (fn-body form-a)) pb (canon (fn-body form-b))]
+  (let [pa (canon (inline-lets (fn-body form-a)))
+        pb (canon (inline-lets (fn-body form-b)))]
     (cond (or (nil? pa) (nil? pb)) nil
           (poly=? pa pb) :proven-equal
           :else :proven-different)))
