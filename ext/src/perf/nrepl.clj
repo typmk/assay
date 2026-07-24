@@ -25,6 +25,7 @@
             [nrepl.transport :as transport]
             [perf.code :as code]
             [perf.diagnose :as diagnose]
+            [perf.forms :as forms]
             [perf.measure :as measure]
             [perf.query :as query]
             [perf.repl :as repl]))
@@ -43,6 +44,10 @@
    "perf/types"      (fn [{:keys [form args]}] (code/types (read-form form) (read-args args)))
    "perf/weigh"      (fn [{:keys [form args]}] (measure/weigh (read-form form) (read-args args)))
    "perf/fix"        (fn [{:keys [form args]}] (measure/fix (read-form form) (read-args args)))
+   ;; the writing-note engine: generate alternative writings of a fn FORM from
+   ;; its own structure and rank them cheapest-synonym-first. Powers the
+   ;; :perf.note/writing editor surface (gna-perf-writing).
+   "perf/writing"    (fn [{:keys [form args]}] (forms/discover (read-form form) (read-args args)))
    "perf/summary"    (fn [_] (repl/summary))
    "perf/describe"   (fn [_] (query/describe (repl/summary)))
    "perf/allocation" (fn [{:keys [n]}] (repl/allocation (as-int n 15)))
