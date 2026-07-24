@@ -35,13 +35,21 @@
 ;; The op table. Each entry: a fn of the request map -> the value to ship.
 ;; The functions are perf's own — notes*, types, weigh live where they
 ;; live; this only routes.
+(defn- as-int [x d] (if x (Integer/parseInt (str x)) d))
+(defn- resolve-in [ns sym] (ns-resolve (symbol (or ns "user")) (symbol sym)))
+
 (def ^:private ops
   {"perf/notes"      (fn [{:keys [form]}] (code/notes* (read-form form)))
    "perf/types"      (fn [{:keys [form args]}] (code/types (read-form form) (read-args args)))
    "perf/weigh"      (fn [{:keys [form args]}] (measure/weigh (read-form form) (read-args args)))
    "perf/fix"        (fn [{:keys [form args]}] (measure/fix (read-form form) (read-args args)))
    "perf/summary"    (fn [_] (repl/summary))
-   "perf/allocation" (fn [{:keys [n]}] (repl/allocation (if n (Integer/parseInt (str n)) 15)))
+   "perf/allocation" (fn [{:keys [n]}] (repl/allocation (as-int n 15)))
+   "perf/blocking"   (fn [{:keys [n]}] (repl/blocking (as-int n 15)))
+   "perf/deopts"     (fn [{:keys [n]}] (repl/deopts (as-int n 15)))
+   "perf/callers"    (fn [{:keys [sym n]}] (repl/callers sym (as-int n 10)))
+   "perf/boxing"     (fn [{:keys [ns sym]}] (some-> (resolve-in ns sym) diagnose/boxing))
+   "perf/scan"       (fn [{:keys [ns]}] (diagnose/scan (symbol (or ns "user"))))
    "perf/by-fn"      (fn [{:keys [ns]}]
                        (query/by-fn (repl/obs)
                                     (diagnose/scan (symbol (or ns "user")))))})
