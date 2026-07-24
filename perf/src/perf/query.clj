@@ -1,8 +1,10 @@
 (ns perf.query
-  "Pure functions over observations. No state, no I/O, no rendering.
-
-  Every fn takes observations explicitly, so a query is testable with a
-  literal vector of maps — no running JVM, no JFR, no feed. Results use
+  "Functions over observations. No I/O, no rendering, and referentially
+  transparent — but not literally stateless: ranking queries call
+  `model/own-frame?`, which memoises into a bounded process-global cache
+  (idempotent; see perf.model). Every fn takes observations explicitly, so
+  a query is testable with a literal vector of maps — no running JVM, no
+  JFR, no feed. Results use
   qualified keys for the same reason the facts do: they cross library
   boundaries, and :fn/:line/:n collide with everything."
   (:require [perf.model :as model]

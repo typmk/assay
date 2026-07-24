@@ -74,7 +74,11 @@
      (.put (.environment pb) "LD_LIBRARY_PATH" lib)
      (let [p (.start pb)
            out (slurp (.getInputStream p))]
-       (.waitFor p)
+       ;; bounded wait + destroy: a wedged or slow warmup would otherwise
+       ;; hang the caller and orphan the child JVM. (redirectErrorStream is
+       ;; already set, so no stdout/stderr deadlock.)
+       (when-not (.waitFor p 120 java.util.concurrent.TimeUnit/SECONDS)
+         (.destroyForcibly p))
        (if (str/includes? out "Could not load hsdis")
          {:perf/error :hsdis-not-loaded :perf/searched lib}
          out)))))

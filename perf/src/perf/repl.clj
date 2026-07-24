@@ -23,6 +23,14 @@
 
 (defonce ^:private session (atom nil))
 
+;; Every mutation of `session` goes through this lock. start!/ensure! were
+;; check-then-act ((when-let [c @session] (stop c)) (reset! ...)), so two
+;; concurrent calls — reachable from concurrent nREPL ops, which all call
+;; ensure! — each built a live Recorder (open JFR stream + daemon poll
+;; thread) and the losers were leaked, never stopped. Starting a recorder
+;; is a heavy side effect; it must be serialized, not raced.
+(defonce ^:private session-lock (Object.))
+
 (defn current
   "The current capture, or nil."
   [] @session)
@@ -31,17 +39,24 @@
   "Begin (or restart) the session capture."
   ([] (start! {}))
   ([opts]
-   (when-let [c @session] (capture/stop c))
-   (reset! session (capture/start opts))
-   @session))
+   (locking session-lock
+     (when-let [c @session] (capture/stop c))
+     (reset! session (capture/start opts))
+     @session)))
 
 (defn stop! []
-  (when-let [c @session]
-    (reset! session (capture/stop c)))
-  @session)
+  (locking session-lock
+    (when-let [c @session]
+      (reset! session (capture/stop c)))
+    @session))
 
 (defn- ensure! []
-  (or @session (start!)))
+  ;; double-checked under the lock: the fast path (already started) takes
+  ;; no lock; only the start races serialize.
+  (or @session
+      (locking session-lock
+        (or @session
+            (do (reset! session (capture/start {})) @session)))))
 
 (defn obs [] (capture/observations (ensure!)))
 

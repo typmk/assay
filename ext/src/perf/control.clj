@@ -19,6 +19,17 @@
   clojure.lang, direct-linked calls. That is where JDI earns its
   complexity, and nowhere else.
 
+  KNOWN LIFECYCLE LIMITS (documented, not patched — validating a fix needs
+  a live jdwp target, and rewriting JDI code you cannot run is the
+  rewrite-you-cannot-test this project refuses):
+    * `restarts!` spawns a (future (loop [] (.remove q) ...)) that is
+      stored nowhere and never cancelled; it blocks on the JDI event
+      queue until the VM detaches. On clojure's non-daemon agent pool this
+      can impede shutdown. A real fix stores and cancels the future.
+    * `carrier`/`object-ref` use a single global mutable Carrier; two
+      concurrent use-value! calls race its one field. Single-user REPL
+      debugging does not hit this, but it is not thread-safe.
+
   FOR CODE YOU OWN, DO NOT USE THIS. Use farolero.
 
   I wrote down that native restarts were a platform limit — conditions

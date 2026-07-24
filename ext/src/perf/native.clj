@@ -64,12 +64,18 @@
   the OS boundary IS the restart, relocated to the one place that can
   enforce it."
   [form]
+  ;; redirectErrorStream so stderr merges into stdout — the prior version
+  ;; slurped stdout to EOF *before* touching stderr, so a child that filled
+  ;; the ~64 KB stderr pipe blocked before flushing stdout and DEADLOCKED
+  ;; the parent. And a bounded wait with .destroyForcibly so a wedged child
+  ;; JVM is killed, not orphaned, on timeout.
   (let [^java.util.List cmd ["clj" "-M" "-e" (pr-str `(println (pr-str ~form)))]
-        p   (.start (ProcessBuilder. cmd))
+        p   (.start (doto (ProcessBuilder. cmd) (.redirectErrorStream true)))
         out (slurp (.getInputStream p))
-        err (slurp (.getErrorStream p))
-        rc  (.waitFor p)]
+        done? (.waitFor p 60 java.util.concurrent.TimeUnit/SECONDS)
+        rc  (if done? (.exitValue p) (do (.destroyForcibly p) :timeout))]
     (cond
+      (= rc :timeout) {:fault {:exit :timeout :note "child JVM exceeded 60s; destroyed"}}
       (zero? rc) {:ok (try (read-string (clojure.string/trim out))
                            (catch Throwable _ (clojure.string/trim out)))}
       ;; 128+n is death by signal n; 134 = SIGABRT, which is what the
@@ -78,5 +84,5 @@
                           :note (if (= rc 134)
                                   "SIGABRT — JVM fatal handler, usually after SIGSEGV"
                                   "died by signal")
-                          :stderr (subs err 0 (min 400 (count err)))}}
-      :else {:error {:exit rc :stderr (subs err 0 (min 400 (count err)))}})))
+                          :output (subs out 0 (min 400 (count out)))}}
+      :else {:error {:exit rc :output (subs out 0 (min 400 (count out)))}})))
