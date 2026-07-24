@@ -59,7 +59,7 @@
                                    (str/join "," (:perf.types/params t))
                                    (:perf.types/returns t))
                   ;; No stored cost — the signature above IS the fact, and
-                  ;; the measured factor is `perf.code/weigh`'s job, live.
+                  ;; the measured factor is `perf.measure/weigh`'s job, live.
                   :unresolved (:perf.types/unresolved t)})))
 
 (defn scan

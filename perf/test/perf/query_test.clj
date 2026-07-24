@@ -89,3 +89,15 @@
     (is (m/own-frame? "app/handler"))
     (is (not (m/own-frame? "app$handler")))
     (is (not (m/own-frame? "clojure.core/map")))))
+
+(deftest by-fn-joins-compile-and-runtime
+  (let [notes [#:perf.note{:var 'user/hot :code :perf.note/reflection
+                           :message "x" :span {:perf/line 3}}]
+        obs   [{:perf/kind :perf.kind/alloc :perf/site {:perf/fn "user/hot" :perf/line 3}}
+               {:perf/kind :perf.kind/alloc :perf/site {:perf/fn "user/hot" :perf/line 3}}
+               {:perf/kind :perf.kind/block :perf/site {:perf/fn "user/cold" :perf/line 9}}]
+        rows  (perf.query/by-fn obs notes)
+        hot   (first (filter #(= "user/hot" (:perf.fn/name %)) rows))]
+    (is (= 1 (count (:perf.fn/compile hot))) "the reflection note")
+    (is (= 2 (get (:perf.fn/runtime hot) :perf.kind/alloc)) "two alloc samples")
+    (is (= #{"user/cold" "user/hot"} (set (map :perf.fn/name rows))))))

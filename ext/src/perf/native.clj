@@ -64,7 +64,8 @@
   the OS boundary IS the restart, relocated to the one place that can
   enforce it."
   [form]
-  (let [p   (.start (ProcessBuilder. ["clj" "-M" "-e" (pr-str `(println (pr-str ~form)))]))
+  (let [^java.util.List cmd ["clj" "-M" "-e" (pr-str `(println (pr-str ~form)))]
+        p   (.start (ProcessBuilder. cmd))
         out (slurp (.getInputStream p))
         err (slurp (.getErrorStream p))
         rc  (.waitFor p)]

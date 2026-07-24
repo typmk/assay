@@ -1,6 +1,18 @@
 (ns perf.remote
   "JDI from a SEPARATE process — the CDT architecture.
 
+  ONE PROTOCOL, TWO BACKENDS. perf.control and perf.remote are the same
+  restart protocol (pending -> use-value!) over two JDI transports:
+  control self-attaches, remote attaches across a socket. They are kept as
+  separate namespaces deliberately — the self-attach path needs deadlock
+  workarounds (object-ref's field-read trick) that the cross-process path
+  does not, and merging them into one transport-parameterised namespace is
+  a rewrite of working JDI code that cannot be validated without a live
+  jdwp target. For code you OWN, neither of these is the tool: use
+  farolero (see perf.control's docstring). JDI is only for frames nobody
+  instrumented.
+
+
   CDT (George Jahad, ~2010) debugged a remote VM from a REPL running on
   another VM, and its distinguishing feature was evaluating arbitrary
   Clojure in the lexical scope of a suspended remote frame. It died with

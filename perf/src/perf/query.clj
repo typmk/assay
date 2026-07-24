@@ -112,6 +112,35 @@
           (take n)
           (mapv (fn [[f c]] {:perf/caller f :perf/calls c}))))))
 
+(defn by-fn
+  "Join compile-time NOTES and runtime OBSERVATIONS by the function they
+  belong to — the one view no other tool gives: what the compiler gave up
+  on, beside what the machine actually spent, per fn.
+
+  They are DIFFERENT fact types and are NOT forced into one schema — a
+  note has a message and a signature, an observation a stack and a sample
+  count. What they share is a SITE, and the site is the join key. Each
+  cost stays in its own basis: the compile side lists the notes, the
+  runtime side counts samples per kind, and the two never share a column —
+  the same discipline capture keeps between JFR weight and census.
+
+  NOTES come from `perf.diagnose/scan` (they carry :perf.note/var). A note
+  taken from a raw form has no fn to key on and is not included."
+  [observations notes]
+  (let [note-fn #(some-> (:perf.note/var %) str)
+        obs-fn  #(get-in % [:perf/site :perf/fn])
+        by-note (group-by note-fn (filter note-fn notes))
+        by-obs  (group-by obs-fn (filter obs-fn observations))
+        fns (into (sorted-set) (concat (keys by-note) (keys by-obs)))]
+    (vec (for [f fns]
+           #:perf.fn{:name f
+                     :compile (mapv #(select-keys % [:perf.note/code
+                                                     :perf.note/message
+                                                     :perf.note/span])
+                                    (by-note f))
+                     :runtime (reduce (fn [m [k os]] (assoc m k (count os)))
+                                      {} (group-by :perf/kind (by-obs f)))}))))
+
 (defn rates
   "Aggregated time view over SAMPLES taken every PERIOD-MS.
 
