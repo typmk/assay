@@ -48,12 +48,23 @@
   ;; profile read off a never-driven class is always empty — that is
   ;; :unavailable, not a finding; driving it hot first is the deferred fix).
   (let [compiler (code/types form args)
-        f (delay (eval form))
-        graal (try (when-let [g (requiring-resolve 'perf.graal/stamps-of)]
-                     (when-let [s (seq (g @f))] (vec s)))
-                   (catch Throwable _ nil))
+        ;; jvmci FIRST: the runtime profile is empty off a never-driven class,
+        ;; so drive the fn hot (C1 profiling tiers populate it) then read. A
+        ;; CONSTANT input profiles nothing (one path, constant-folded), so
+        ;; numeric args are VARIED per iteration to exercise the branches.
+        ;; MUST run before graal below: building a StructuredGraph initialises
+        ;; the Graal runtime and flips JIT state that suppresses this profile
+        ;; (measured — reading jvmci after graal in-process returns empty).
+        ;; This is the observed-types signal SBCL (AOT) cannot have.
         jvmci (try (when-let [p (requiring-resolve 'perf.jvmci/profile)]
-                     (when-let [pr (seq (p @f))] (vec pr)))
+                     (when (seq args)
+                       (let [g (eval form)]
+                         (dotimes [i 200000]
+                           (apply g (mapv (fn [a] (if (number? a) (+ a (rem i 32)) a)) args)))
+                         (when-let [pr (seq (p g))] (vec pr)))))
+                   (catch Throwable _ nil))
+        graal (try (when-let [g (requiring-resolve 'perf.graal/stamps-of)]
+                     (when-let [s (seq (g (eval form)))] (vec s)))
                    (catch Throwable _ nil))]
     {:perf.explain/rank :perf.rank/read
      :perf.explain/data (cond-> {:compiler compiler}
@@ -94,17 +105,17 @@
        (let [notes (:perf.explain/data reading)]
          (or (nil? notes) (zero? (count notes))))))
 
-(defn- avoidable-allocation?
-  "Did OUTCOME find a VERIFIED cheaper writing that removes bytes? This is
-  the sound core of blind?: not 'the form allocates' (harness noise, or a
-  vector you asked to build), but 'a rewrite proven equivalent allocates
-  less' — evidence the cost was avoidable and the compiler said nothing."
+(defn- byte-saving-rewrite
+  "The single most byte-saving proven-equivalent rewrite OUTCOME found, or nil.
+  The actionable core the two oracles COMPOSE to produce: a form the compiler
+  said nothing about, and the exact cheaper equivalent + how many bytes it
+  saves. This is what turns blind? from a verdict into a remedy."
   [outcome-reading]
-  (boolean
-   (some (fn [row]
-           (and (= :perf.forms/cheaper-synonym (:perf.forms/kind row))
-                (pos? (or (:perf.forms/bytes-saved row) 0))))
-         (:perf.explain/data outcome-reading))))
+  (->> (:perf.explain/data outcome-reading)
+       (filter (fn [row] (and (= :perf.forms/cheaper-synonym (:perf.forms/kind row))
+                              (pos? (or (:perf.forms/bytes-saved row) 0)))))
+       (sort-by (comp - :perf.forms/bytes-saved))
+       first))
 
 (defn explain
   "Ask all four oracles of FORM (a fn form) and return one rank-tagged map:
@@ -127,12 +138,15 @@
                              [k (run-oracle oracle form args opts)]))
          structure (:perf.explain/structure readings)
          outcome (:perf.explain/outcome readings)
-         blind? (and (structure-silent? structure)
-                     (= :perf.rank/mixed (:perf.explain/rank outcome))
-                     (avoidable-allocation? outcome))]
-     (assoc readings
-            :perf.explain/subject form
-            :perf.explain/blind? blind?))))
+         remedy (when (= :perf.rank/mixed (:perf.explain/rank outcome))
+                  (byte-saving-rewrite outcome))
+         blind? (and (structure-silent? structure) (some? remedy))]
+     (cond-> (assoc readings
+                    :perf.explain/subject form
+                    :perf.explain/blind? blind?)
+       remedy (assoc :perf.explain/remedy
+                     {:perf.explain/rewrite (:perf.forms/candidate remedy)
+                      :perf.explain/bytes-saved (:perf.forms/bytes-saved remedy)})))))
 
 (defn summary
   "The always-on eldoc glance: STRUCTURE (compiler notes) + the compiler's own

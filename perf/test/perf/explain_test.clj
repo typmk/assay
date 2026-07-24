@@ -52,3 +52,17 @@
           "precondition: the compiler emits no note for the seq pipeline")
       (is (true? (:perf.explain/blind? e))
           "blind? composes STRUCTURE-silent with an OUTCOME byte-saving rewrite"))))
+
+(deftest blind?-carries-an-actionable-remedy
+  (testing "when blind?, explain attaches the cheapest byte-saving rewrite +
+            savings (COST<->OUTCOME composition: a remedy, not just a verdict)"
+    (let [e (explain/explain '(fn [xs] (->> xs (map inc) (filter even?) (reduce +)))
+                             [(vec (range 200))])
+          remedy (:perf.explain/remedy e)]
+      (is (some? remedy) "a remedy is present when a cheaper writing exists")
+      (is (pos? (:perf.explain/bytes-saved remedy)) "it reports bytes saved")
+      (is (some #{'transduce} (flatten (:perf.explain/rewrite remedy)))
+          "the rewrite is the fused transducer")))
+  (testing "no remedy on an already-optimal primitive fn"
+    (is (nil? (:perf.explain/remedy
+               (explain/explain '(fn ^long [^long a ^long b] (unchecked-add a b)) [3 4]))))))
