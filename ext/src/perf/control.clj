@@ -110,14 +110,21 @@
              req     (.createExceptionRequest (.eventRequestManager vm) rt true true)]
          (.setSuspendPolicy req com.sun.jdi.request.EventRequest/SUSPEND_EVENT_THREAD)
          (.enable req)
+         ;; capture ANY suspension point — exception, breakpoint, or step.
+         ;; SLDB suspends on all three; the resume half (pending/use-value!)
+         ;; does not care which kind stopped the thread, only that it is
+         ;; stopped with a live stack.
          (future (let [q (.eventQueue vm)]
                    (loop []
                      (doseq [e (iterator-seq (.eventIterator (.remove q)))]
-                       (when (instance? com.sun.jdi.event.ExceptionEvent e)
+                       (when (or (instance? com.sun.jdi.event.ExceptionEvent e)
+                                 (instance? com.sun.jdi.event.BreakpointEvent e)
+                                 (instance? com.sun.jdi.event.StepEvent e))
                          (reset! pending e)))
                      (recur))))
          (reset! dbg {:vm vm :pending pending}))))
    :armed))
+
 
 (defn- frame-locals
   "Visible locals of a suspended frame, as data.
@@ -142,13 +149,20 @@
   ([n]
    (if-let [e (some-> @dbg :pending deref)]
      (let [t (.thread e)]
-       {:perf.dbg/exception (.name (.referenceType (.exception e)))
-        :perf.dbg/thread (.name t)
-        :perf.dbg/frames
-        (vec (for [^com.sun.jdi.StackFrame f (take n (.frames t))]
-               #:perf.dbg{:fn (fname f)
-                          :line (.lineNumber (.location f))
-                          :locals (frame-locals f)}))})
+       (cond-> {:perf.dbg/thread (.name t)
+                :perf.dbg/at (condp instance? e
+                               com.sun.jdi.event.ExceptionEvent :exception
+                               com.sun.jdi.event.BreakpointEvent :breakpoint
+                               com.sun.jdi.event.StepEvent :step
+                               :suspended)
+                :perf.dbg/frames
+                (vec (for [^com.sun.jdi.StackFrame f (take n (.frames t))]
+                       #:perf.dbg{:fn (fname f)
+                                  :line (.lineNumber (.location f))
+                                  :locals (frame-locals f)}))}
+         ;; only exception events carry a thrown value
+         (instance? com.sun.jdi.event.ExceptionEvent e)
+         (assoc :perf.dbg/exception (.name (.referenceType (.exception e))))))
      :nothing-suspended)))
 
 ;; A JDI ObjectReference for an arbitrary value, without invokeMethod.
