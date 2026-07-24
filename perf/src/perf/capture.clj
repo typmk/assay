@@ -30,6 +30,34 @@
    "jdk.JavaMonitorWait"        :perf.kind/block
    "jdk.Deoptimization"         :perf.kind/deopt})
 
+;; The rest of perf speaks qualified keywords; `start` should too. JFR's
+;; own event names are strings ("jdk.ObjectAllocationSample"), so a caller
+;; who reached for the vocabulary the tool uses everywhere else —
+;; (start {:types [:alloc]}) — got a ClassCastException from deep inside
+;; start-stream. Accept a friendly short keyword, the datafy'd
+;; :perf.kind/* keyword, or the JFR string itself; normalise to the string
+;; the RecordingStream needs.
+(def ^:private event-aliases
+  (merge (into {} (map (fn [[jfr kind]] [kind jfr])) event-kinds)
+         {:alloc  "jdk.ObjectAllocationSample"
+          :block  "jdk.JavaMonitorEnter"
+          :monitor "jdk.JavaMonitorEnter"
+          :park   "jdk.ThreadPark"
+          :wait   "jdk.JavaMonitorWait"
+          :deopt  "jdk.Deoptimization"}))
+
+(defn- ->event
+  "Normalise an event spec to the JFR event-name string RecordingStream
+  needs. Accepts the JFR string, a friendly keyword (:alloc :block :park
+  :wait :monitor :deopt), or the datafy'd :perf.kind/* keyword."
+  [t]
+  (cond
+    (string? t) t
+    (contains? event-aliases t) (event-aliases t)
+    :else (throw (IllegalArgumentException.
+                  (str "unknown event " (pr-str t) " — pass a JFR name string or one of "
+                       (pr-str (vec (sort (keys event-aliases)))))))))
+
 (defn- attrs-for
   "Kind-specific values as top-level QUALIFIED keys, merged flat.
   Nesting under :attrs is what you do without namespaces; with them the
@@ -66,7 +94,15 @@
   (let [obs (atom [])
         dropped (atom 0)
         rs  (jdk.jfr.consumer.RecordingStream.)]
-    (doseq [t types] (.withStackTrace ^jdk.jfr.EventSettings (.enable rs ^String t)))
+    (doseq [t types]
+      (let [^jdk.jfr.EventSettings s (.withStackTrace ^jdk.jfr.EventSettings (.enable rs ^String t))]
+        ;; ObjectAllocationSample is THROTTLED — default rate produced 1
+        ;; sample over a 5-GC render, so the site ranking was empty. A rate
+        ;; makes the sites actually populate. Throttle is only valid for
+        ;; the sample event; setting it on a monitor/park event throws, so
+        ;; it is scoped to the one event that takes it.
+        (when (= t "jdk.ObjectAllocationSample")
+          (.with s "throttle" "2000/s"))))
     (doseq [t types]
       (let [kind (event-kinds t)]
         (.onEvent rs t (reify java.util.function.Consumer
@@ -191,7 +227,7 @@
      :or {period-ms 500 keep 240 tap? false}}]
    (cap/require! :jfr)
    (map->Recorder {:started (System/currentTimeMillis)
-                  :stream (start-stream (or types (keys event-kinds)) tap?
+                  :stream (start-stream (map ->event (or types (keys event-kinds))) tap?
                                         (or max-observations default-max-observations))
                   :poll (start-poll period-ms keep)})))
 
@@ -203,9 +239,15 @@
   (assoc recorder :stopped (System/currentTimeMillis)))
 
 (defn observations
-  "The facts recorded so far. THE input to perf.query."
-  [recorder]
-  (if-let [o (get-in recorder [:stream :obs])] @o []))
+  "The facts recorded so far. THE input to perf.query.
+
+  Accepts a live RECORDER or a SNAPSHOT value: snapshot stores the same
+  facts under :perf/observations, and a caller holding a snapshot
+  naturally reaches for (observations snap). Both feed query."
+  [recorder-or-snapshot]
+  (or (get recorder-or-snapshot :perf/observations)
+      (some-> (get-in recorder-or-snapshot [:stream :obs]) deref)
+      []))
 
 (defn samples
   "Time series from the poll mechanism."

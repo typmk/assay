@@ -120,62 +120,159 @@
 
 (defn- primitive-tag? [t] (#{'long 'double} t))
 
+(defn fn-parts
+  "Decompose a (fn name? [params] body...) form into {:head :name :params
+  :body}, where :body is the SEQ of body forms. The ONE fn-form parser:
+  hint-fn and param-tags here, and forms' fn-body/fn-rebody, had each
+  open-coded this same anatomy four ways. Homed in measure because forms
+  already requires it and measure precedes it in build order — no new edge."
+  [form]
+  (let [[head & more] form
+        named? (symbol? (first more))]
+    {:head head
+     :name (when named? (first more))
+     :params (if named? (second more) (first more))
+     :body (if named? (nnext more) (next more))}))
+
 (defn- hint-fn
   "Rewrite (fn [a b] body) as (fn ^ret [^t1 a ^t2 b] body), taking the
   tags from the classes of ARGS and of the value the original returned."
   [form arg-classes ret-class]
-  (let [[hd & more] form
-        [fname params body] (if (symbol? (first more))
-                              [(first more) (second more) (nnext more)]
-                              [nil (first more) (next more)])
+  (let [{:keys [head name params body]} (fn-parts form)
         tagged (mapv (fn [p c] (vary-meta p assoc :tag (tag-for c)))
                      params arg-classes)
         ret-tag (tag-for ret-class)
         params' (if (primitive-tag? ret-tag)
                   (vary-meta tagged assoc :tag ret-tag)
                   tagged)]
-    (concat [hd] (when fname [fname]) [params'] body)))
+    (concat [head] (when name [name]) [params'] body)))
 
 (defn- param-tags [form]
-  (let [more (next form)
-        params (if (symbol? (first more)) (second more) (first more))]
-    (mapv #(:tag (meta %)) params)))
+  (mapv #(:tag (meta %)) (:params (fn-parts form))))
 
-(defn- bench-form
-  "Build and eval a self-contained timing loop for FN-FORM called on ARGS.
+(defn- num? [x] (number? x))
+(defn- vecnum? [x] (and (sequential? x) (every? number? x)))
 
-  The whole loop is generated as ONE form so the sample arguments stay
-  let-locals in the same scope as the call. Two earlier versions got this
-  wrong in opposite directions and both inverted the result:
+(defn- ->samples
+  "Expand a single arg-tuple into a POOL of tuples the JIT cannot constant-
+  fold. The red-team's teardown: a fixed sample arg let HotSpot fold
+  (f 3.0) to a literal and a whole pow-vs-mul benchmark measured 0ns. When
+  the args are numeric — bare numbers or seqs of numbers — perturb them
+  type-preservingly (integers by +k, floats by ×(1+0.03k)) into 8 distinct
+  tuples. Non-numeric args cannot be safely perturbed, so they pass through
+  as one tuple and weigh flags :fold-risk."
+  [args]
+  (let [jit (fn [a k]
+              (cond (integer? a)   (+ (long a) (long k))
+                    (num? a)       (* (double a) (+ 1.0 (* 0.03 k)))
+                    (vecnum? a)    (mapv (fn [x] (if (integer? x) (+ (long x) (long k))
+                                                     (* (double x) (+ 1.0 (* 0.03 k))))) a)
+                    :else a))]
+    (if (every? #(or (num? %) (vecnum? %)) args)
+      (mapv (fn [k] (mapv #(jit % k) args)) (range 8))
+      [(vec args)])))
 
-    * closing over the args in a (fn [] (f a b)) thunk BOXES them —
-      closed-over primitives become Object fields, so a primitive-hinted
-      fn cannot take the invokePrim path and measured SLOWER than the
-      boxed version it was supposed to beat (0.14x).
-    * hinting those locals instead throws outright: you cannot ^long a
-      local whose initialiser is already a primitive.
+(defn- alloc-bytes
+  "Bytes THIS thread allocated running F once, via the ThreadMXBean counter.
+  Kept local to measure — the perf facade and capture read the same counter,
+  but depending on either from here would drag their weight onto the measure
+  path for two lines of MXBean access. Duplication is the cheaper trade."
+  ^long [f]
+  (let [tmx ^com.sun.management.ThreadMXBean
+        (java.lang.management.ManagementFactory/getThreadMXBean)
+        tid (.getId (Thread/currentThread))
+        b0 (.getThreadAllocatedBytes tmx tid)]
+    (f)
+    (- (.getThreadAllocatedBytes tmx tid) b0)))
 
-  Neither is a fact about Clojure's performance. Both were the harness
-  measuring its own call site."
-  [fn-form args reps]
-  (let [syms (mapv (fn [i] (gensym (str "a" i "_"))) (range (count args)))]
-    ;; warnings off while benchmarking: `notes` already reported them, and
-    ;; re-emitting one per trial makes it look like the tool found five
-    ;; problems instead of measuring one five times.
+(defn- runner
+  "Eval a no-arg fn that drives FN-FORM over the rotated sample POOL exactly
+  REPS times, sinking every result into a primitive accumulator it returns.
+  Rotation defeats constant-folding; the returned sink defeats dead-code
+  elimination — the two failures the red-team's teardown found in the old
+  harness (a fixed arg let HotSpot fold the call to 0ns). The fingerprint
+  is zero-alloc for numeric returns (Double/hashCode over a primitive), so
+  it does not pollute the allocation measurement.
+
+  One eval'd fn with direct-arity calls (no apply, no closure over the
+  args) so a primitive-hinted param keeps the invokePrim path — an earlier
+  thunk-closure boxed them and measured 0.14x."
+  [fn-form sample-tuples reps sink]
+  (let [n (count sample-tuples)
+        k (count (first sample-tuples))
+        i (gensym "i_") tv (gensym "tv_") t (gensym "t_") acc (gensym "acc_")
+        f (gensym "f_")
+        call `(~f ~@(map (fn [j] `(nth ~t ~j)) (range k)))
+        fold (case sink
+               :double `(unchecked-add ~acc (long (Double/hashCode (double ~call))))
+               :long   `(unchecked-add ~acc (Long/hashCode (long ~call)))
+               `(unchecked-add ~acc (long (System/identityHashCode ~call))))]
     (binding [*warn-on-reflection* false *unchecked-math* false]
       (eval `(fn []
-             (let [f# ~fn-form
-                   ~@(interleave syms (map (fn [a] `(quote ~a)) args))]
-               (dotimes [_# 200000] (f# ~@syms))
-               (let [t0# (System/nanoTime)]
-                 (dotimes [_# ~reps] (f# ~@syms))
-                 (/ (double (- (System/nanoTime) t0#)) ~reps))))))))
+               (let [~tv ~(mapv vec sample-tuples) ~f ~fn-form]
+                 (loop [~i 0 ~acc 0]
+                   (if (< ~i ~reps)
+                     (let [~t (nth ~tv (rem ~i ~n))] (recur (unchecked-inc ~i) ~fold))
+                     ~acc))))))))
+
+(defn- bench-form
+  "Median-free single timed pass: warm, then time REPS driven iterations,
+  return ns/call. weigh calls this per trial and takes the median across
+  trials — one shot is an anecdote."
+  [fn-form sample-tuples reps sink]
+  (let [warm  (runner fn-form sample-tuples 200000 sink)
+        drive (runner fn-form sample-tuples reps sink)]
+    (warm)
+    (let [t0 (System/nanoTime) r (drive) e (- (System/nanoTime) t0)]
+      (when (== (double r) ##Inf) (println r))     ; observe the sink
+      (/ (double e) reps))))
+
+(defn- alloc-per-call
+  "Bytes FN-FORM allocates per call, averaged over the sample pool via
+  direct-arity driven calls — so only the fn's own allocation counts, not
+  apply's arg-seq. The :double/:long sink allocates nothing, so a
+  zero-allocation primitive rewrite reads as zero."
+  ^long [fn-form sample-tuples sink]
+  (let [reps  (max (count sample-tuples) 2000)
+        drive (runner fn-form sample-tuples reps sink)]
+    (drive)                                        ; load classes first
+    (quot (alloc-bytes drive) reps)))
+
+(defn- sink-for [ret]
+  (cond (and (number? ret) (not (integer? ret))) :double
+        (integer? ret) :long
+        :else :object))
+
+;; The driven timing loop (arg fetch by index + result sink) is not free.
+;; The red-team measured its floor at ~13-14ns: an arg-independent constant
+;; form reported 13.46ns. Below this, absolute ns is harness-dominated.
+(def ^:private driver-floor-ns 15.0)
 
 (defn- round2 ^double [x]
   ;; (double x) because Math/round is overloaded on float and double and
   ;; a Number satisfies neither — reflective, in the namespace that
   ;; reports reflection, for the second time in this file.
   (/ (Math/round (* 100.0 (double x))) 100.0))
+
+(defn same?
+  "Do two results agree? Numbers compare by VALUE with a float tolerance —
+  clojure.core/= makes (= 6 6.0) false and a primitive rewrite legitimately
+  returns 6.0 where the boxed original returned 6, so raw = would report a
+  correct rewrite as changing the answer. Sequentials compare element-wise;
+  everything else with =.
+
+  The ONE numeric-tolerant equality for the toolkit: weigh's same-result
+  check AND forms' outcome oracle. It lived twice (measure/same? scalar-only,
+  forms/num=? with the sequential branch) and the copies had already
+  diverged; this is the superset, homed here because forms already requires
+  measure."
+  [a b]
+  (cond
+    (and (number? a) (number? b))
+    (or (== a b) (< (Math/abs (- (double a) (double b))) 1e-9))
+    (and (sequential? a) (sequential? b) (= (count a) (count b)))
+    (every? true? (map same? a b))
+    :else (= a b)))
 
 (defn weigh
   "Measure the form as written against the form the compiler wanted, using
@@ -186,9 +283,61 @@
   rewrite actually silenced the notes, so a rewrite that looked plausible
   but changed nothing reports itself instead of quietly inflating.
 
-    (code/weigh '(fn [a b] (+ a b)) [3 4])"
+    (code/weigh '(fn [a b] (+ a b)) [3 4])
+
+  When the compiler is SILENT — idiomatic Clojure over seqs, persistent
+  vectors and boxed collection math produces no note to derive a rewrite
+  from, which is exactly where the biggest wins hide — pass your own
+  candidate as :against. weigh then holds it to the same bar it holds an
+  auto-derived rewrite: same result (numeric tolerance), timed against the
+  original over TRIALS, verdict gated on the spread.
+
+    (weigh '(reduce + (map * a b)) '{...}      ; the boxed original
+           {:against '(let [^doubles a a ...] ...)})  ; your primitive rewrite"
   ([form args] (weigh form args {}))
-  ([form args {:keys [reps trials] :or {reps 2000000 trials 5}}]
+  ([form args {:keys [reps trials against] :or {reps 2000000 trials 5}}]
+   (if against
+     ;; EXPLICIT-alternative path. The notes gate does not apply: the whole
+     ;; point is to measure a rewrite the compiler had nothing to say about.
+     ;; The discipline is unchanged — the clock decides, same-result guards
+     ;; correctness, the spread decides whether the run can tell at all.
+     (let [f   (binding [*warn-on-reflection* false *unchecked-math* false] (eval form))
+           g   (binding [*warn-on-reflection* false *unchecked-math* false] (eval against))
+           ret (apply f args) ret' (apply g args)
+           samples (->samples args)
+           sink (sink-for ret)
+           pairs (vec (for [_ (range trials)]
+                        [(bench-form form samples reps sink)
+                         (bench-form against samples reps sink)]))
+           med (fn [xs] (nth (sort xs) (quot (count xs) 2)))
+           factors (mapv (fn [[a b]] (/ a b)) pairs)
+           lo (apply min factors) hi (apply max factors)
+           a-form (alloc-per-call form samples sink)
+           a-alt  (alloc-per-call against samples sink)
+           as-w (round2 (med (map first pairs)))
+           alt  (round2 (med (map second pairs)))]
+       #:perf.weigh{:as-written-ns  as-w
+                    :alternative-ns alt
+                    :factor (round2 (med factors))
+                    :factor-range [(round2 lo) (round2 hi)]
+                    :as-written-bytes a-form
+                    :alternative-bytes a-alt
+                    :bytes-saved (- a-form a-alt)
+                    :trials trials
+                    :verdict (cond (> lo 1.05) :perf.weigh/alternative-is-faster
+                                   (< hi 0.95) :perf.weigh/alternative-is-slower
+                                   :else :perf.weigh/inconclusive)
+                    :basis :perf.cost.basis/measured
+                    :reps reps
+                    :samples-used (count samples)
+                    :fold-risk (< (count samples) 2)
+                    ;; the driver loop (arg fetch + sink) has a ~13ns floor —
+                    ;; red-team measured it. Below it, ABSOLUTE ns is
+                    ;; harness-dominated (the ratio still cancels the common
+                    ;; overhead, so :factor stays meaningful). Say so.
+                    :below-floor? (< (min as-w alt) driver-floor-ns)
+                    :same-result (same? ret ret')
+                    :alternative against})
    (let [before (code/notes* form)]
      (if (empty? before)
        #:perf.weigh{:notes-before 0
@@ -197,6 +346,8 @@
              ret (apply f args)
              rewrite (hint-fn form (mapv class args) (class ret))
              after (code/notes* rewrite)
+             samples (->samples args)
+             sink (sink-for ret)
              ;; TRIALS, not one shot. Three runs of one small form gave
              ;; 1.06, 0.79 and 1.54 — one of them claiming the FIXED
              ;; version was slower. For a difference this small the noise
@@ -204,8 +355,8 @@
              ;; the exact failure this tool exists to prevent. So:
              ;; alternate the two, take medians, and report the spread.
              pairs (vec (for [_ (range trials)]
-                          [((bench-form form args reps))
-                           ((bench-form rewrite args reps))]))
+                          [(bench-form form samples reps sink)
+                           (bench-form rewrite samples reps sink)]))
              med (fn [xs] (nth (sort xs) (quot (count xs) 2)))
              factors (mapv (fn [[a b]] (/ a b)) pairs)
              as-written (med (map first pairs))
@@ -234,7 +385,7 @@
                       ;; pr-str hides, so the rewrite prints identical to
                       ;; the original and looks like nothing happened.
                       :hints (param-tags rewrite)
-                      :rewrite rewrite})))))
+                      :rewrite rewrite}))))))
 
 
 ;; ── applying it ───────────────────────────────────────────────────
