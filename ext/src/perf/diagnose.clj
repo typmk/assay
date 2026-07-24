@@ -45,22 +45,22 @@
                   :span {:perf/file (:file m)
                          :perf/line (:line m)
                          :perf/col (or (:column m) 1)}
-                  :message "compiler emitted a boxed body"
-                  ;; Cost comes from perf.code/costs, so the number a
-                  ;; diagnostic quotes and the number `notes` ranks by
-                  ;; cannot drift apart. It used to be a prose string here
-                  ;; and a different prose string there, which is how two
-                  ;; sources of one truth begin.
-                  :cost (code/cost :perf.note/boxed-body)
-                  :cost-basis :perf.cost.basis/measured
-                  :why (get-in code/costs [:perf.note/boxed-body :perf.cost/why])
+                  ;; The MESSAGE is the derived signature itself, not perf
+                  ;; prose. "compiler emitted a boxed body" was perf's
+                  ;; sentence; "(Object,Object)Object" is what the compiler
+                  ;; actually emitted, read off the class. The fact is the
+                  ;; message. No :why, no :suggestion — the signature and
+                  ;; the unresolved positions already say everything, and
+                  ;; the fix is the same as `notes` shows: hint them.
+                  :message (format "(%s)%s"
+                                   (str/join "," (:perf.types/params t))
+                                   (:perf.types/returns t))
                   :emitted (format "(%s)%s"
                                    (str/join "," (:perf.types/params t))
                                    (:perf.types/returns t))
                   :unresolved (:perf.types/unresolved t)
-                  :suggestion #:perf.note{:with "hint the params and return primitive"
-                                          :example (str "(defn ^long " (:name m) " ^long [...] ...)")
-                                          :applicability :perf.note.applicability/maybe}})))
+                  :cost (code/cost :perf.note/boxed-body)
+                  :cost-basis :perf.cost.basis/measured})))
 
 (defn scan
   "Diagnostics for every OPTED-IN fn in NS, worst cost first.

@@ -127,18 +127,6 @@
   {"Reflection" :perf.note/reflection
    "Boxed math" :perf.note/boxed-math})
 
-(defn- suggestion-for [note-code detail]
-  (case note-code
-    :perf.note/reflection
-    {:perf.note/with "type-hint the target so the call resolves at compile time"
-     :perf.note/applicability :perf.note.applicability/maybe
-     :perf.note/example "(.length ^String s)"}
-    :perf.note/boxed-math
-    {:perf.note/with "hint the params and return primitive"
-     :perf.note/applicability :perf.note.applicability/maybe
-     :perf.note/example "(defn f ^long [^long n] ...)"}
-    nil))
-
 ;; ── what the compiler took, and what it could have taken ──────────
 ;;
 ;; SBCL prints "forced to do GENERIC-+ (cost 10)" beside "unable to do
@@ -211,10 +199,14 @@
                         :perf/line (parse-long line)
                         :perf/col (parse-long col)}
                  :message (str/replace detail #"\.$" "")
+                 ;; cost is a NUMBER with a basis, not prose — kept for
+                 ;; ranking. Everything else on a note is the compiler's
+                 ;; own string (:message), the emitted signature, or the
+                 ;; overloads read off the class. perf adds no explanation
+                 ;; of its own: :why and :suggestion were perf's voice, and
+                 ;; the derived facts already say what they said.
                  :cost (cost c)
-                 :cost-basis (get-in costs [c :perf.cost/basis])
-                :why (get-in costs [c :perf.cost/why])
-                :suggestion (suggestion-for c detail)}
+                 :cost-basis (get-in costs [c :perf.cost/basis])}
       (alternatives detail))))
 
 
@@ -307,8 +299,12 @@
   `(notes* ~(if (and (seq? form) (= 'quote (first form))) form `'~form)))
 
 (defn explain
-  "Render notes the way rustc and SBCL do — one block per note, worst
-  first. The data is still the data; this is one rendering of it."
+  "A thin conduit for the DERIVED strings on a note — the compiler's own
+  message, the signature it emitted, the overloads it took and refused,
+  and the cost number. perf authors none of this text; it passes through
+  what the compiler and the class already said. The data is the data; if
+  you want it rendered some other way, read the map. Primary interface is
+  the map, not this."
   [ns]
   ;; sequential?, not vector?. Anything that filters or takes hands you a
   ;; lazy seq, which vector? rejects — so it got wrapped in a vector and
@@ -317,20 +313,22 @@
   (let [ns (if (sequential? ns) ns [ns])]
     (with-out-str
       (doseq [n ns]
+        ;; Ordered fetch-first, like SBCL's `describe`: the compiler's own
+        ;; message, then what it EMITTED and the overloads it took/refused —
+        ;; the raw machine facts — THEN the measured cost, and the canned
+        ;; `why` prose last of the data lines because it is the only
+        ;; interpretation in the note. The fact leads; the explanation
+        ;; trails.
         (printf "note[%s]: %s\n" (name (:perf.note/code n)) (:perf.note/message n))
         (let [{:perf/keys [file line col]} (:perf.note/span n)]
           (printf "  --> %s:%s:%s\n" (or file "<form>") line col))
-        (when-let [c (:perf.note/cost n)]
-          (printf "   = cost: %sx  (%s)\n" c (name (:perf.note/cost-basis n))))
-        (when-let [w (:perf.note/why n)] (printf "   = why: %s\n" w))
         (when-let [e (:perf.note/emitted n)] (printf "   = emitted: %s\n" e))
         (when-let [t (:perf.note/taken n)] (printf "   = took:    %s\n" t))
         (when-let [r (seq (:perf.note/refused n))]
           (printf "   = refused: %s\n" (str/join ", " r)))
         (when-let [v (:perf.note/var n)] (printf "   = var: %s\n" v))
-        (when-let [s (:perf.note/suggestion n)]
-          (printf "  help: %s\n        %s\n"
-                  (:perf.note/with s) (:perf.note/example s)))
+        (when-let [c (:perf.note/cost n)]
+          (printf "   = cost: %sx  (%s)\n" c (name (:perf.note/cost-basis n))))
         (println)))))
 
 ;; ── rungs 0, 2, 3 ─────────────────────────────────────────────────

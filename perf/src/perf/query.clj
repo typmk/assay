@@ -134,6 +134,15 @@
          :perf.heap/now-mb (/ (last heaps) 1e6)
          :perf.heap/peak-mb (/ (apply max heaps) 1e6)
          :perf.heap/floor-mb (/ (apply min heaps) 1e6)
+         ;; The verdict's EVIDENCE, exposed. `:floor-rising` was handed
+         ;; down with only the combined floor visible — you could not see
+         ;; the two numbers it compared. SBCL never does that: `describe`
+         ;; shows the derived type, `time` shows the cycles, and you draw
+         ;; the conclusion. So both half-window floors and their ratio are
+         ;; here, and the verdict is a tag you can check, not one to trust.
+         :perf.heap/floor-first-mb (/ f1 1e6)
+         :perf.heap/floor-second-mb (/ f2 1e6)
+         :perf.heap/floor-ratio (if (pos? f1) (/ (double f2) f1) 1.0)
          :perf/verdict (cond (> f2 (* 1.15 f1)) :perf.verdict/floor-rising
                              (< f2 (* 0.85 f1)) :perf.verdict/floor-falling
                              :else :perf.verdict/stable)}))))
@@ -168,10 +177,46 @@
           (range) obs))
 
 (defn summary
-  "Everything worth checking. Ordered by the questions you actually ask:
-  is it leaking, how hard is it allocating, and where."
+  "Everything worth checking, as DATA. Every key coexists — the
+  measurements, their ranked sites, and a verdict tag beside its evidence.
+
+  This is the opt-in digest, the sb-sprof :report of this library. The raw
+  facts it reduces (observations, samples) stay reachable underneath it;
+  nothing here replaces them. To render it fetch-first, `describe`."
   [obs samples period-ms]
   (merge (rates samples period-ms)
          {:perf/top-alloc (allocation obs 5)
           :perf/top-blocked (blocking obs 3)
           :perf/top-deopts (deopts obs 3)}))
+
+(defn- mb [x] (when x (format "%.1f MB" (double x))))
+
+(defn describe
+  "Render a `summary` the way SBCL renders `describe` and `time`: labeled
+  JVM measurements, then the ranked sites as raw facts. The numbers are
+  the MXBeans' and JFR's; perf adds only the field labels and does the
+  arithmetic. No verdict WORD is printed — the two half-window floors and
+  their ratio are the reading; whether that is 'rising' is yours to say,
+  the same way `time` prints cycles and lets you call it slow. The verdict
+  tag lives in the map for anyone who wants it; it is not printed here.
+
+  The map is the data. This is one reading of it, for someone who would
+  rather see the readings than be told what they mean."
+  [s]
+  (with-out-str
+    (printf "heap    now %s   peak %s   floor %s\n"
+            (mb (:perf.heap/now-mb s)) (mb (:perf.heap/peak-mb s)) (mb (:perf.heap/floor-mb s)))
+    (when-let [m (:perf.alloc/mean-mb-s s)]
+      (printf "alloc   mean %.1f MB/s   peak %.1f MB/s\n" (double m) (double (:perf.alloc/peak-mb-s s))))
+    (printf "floor   first-half %s   second-half %s   ratio %.2fx\n"
+            (mb (:perf.heap/floor-first-mb s)) (mb (:perf.heap/floor-second-mb s))
+            (double (or (:perf.heap/floor-ratio s) 1.0)))
+    (doseq [[label rows] [["alloc sites" (:perf/top-alloc s)]
+                          ["blocked at" (:perf/top-blocked s)]
+                          ["deopts" (:perf/top-deopts s)]]
+            :when (seq rows)]
+      (printf "\n%s\n" label)
+      (doseq [r rows]
+        (printf "  %-40s n=%s%s\n"
+                (str (:perf/fn r) ":" (:perf/line r)) (:perf/n r)
+                (if-let [t (:perf/total r)] (format "  total=%s" t) ""))))))
