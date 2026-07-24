@@ -164,6 +164,29 @@ Java to read. Reading the emitted signature as DATA
 (`emitted-signature`) is the small remaining step, and the decompiler
 does the heavy lifting for the rungs either side of it.
 
+### farolero — https://github.com/IGJoshua/farolero
+
+**Prior art for the half of `perf.control/restarts!` that should never
+have been JDI.** I recorded "native restarts" as a platform limit — the
+condition system being a language feature in SBCL, LispWorks and Genera,
+and the JVM having none. Wrong. CL's conditions are dynamic binding plus
+non-local exit; Clojure has both; it is a library question, and
+org.suskalo/farolero (same author as coffi) is that library, with the
+full surface: restart-case, handler-bind, invoke-restart, use-value,
+store-value, compute-restarts, find-restart, and block/return-from/
+tagbody/go.
+
+Verified against the identical test given to SBCL: normal 25, resumed 42.
+With five intervening frames the handler ran on a live 51-frame stack —
+before unwinding, which is the property that makes conditions worth
+having rather than a fancy try/catch.
+
+JDI keeps exactly the case farolero cannot reach, and it is the same case
+SBCL reserves for its own debugger: farolero needs the restart
+ESTABLISHED at the call site, so resuming a frame inside a third-party
+library, clojure.lang or a JDK internal is sb-debug's return-from-frame,
+not a language gap. Two tiers; the cheap one is farolero.
+
 ### coffi — https://github.com/IGJoshua/coffi
 
 `org.suskalo/coffi`, a maintained wrapper over java.lang.foreign,

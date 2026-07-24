@@ -19,8 +19,12 @@ build () {                       # dir  jar  min-classes  ns...
   local dir=$1 jar=$2 min=$3; shift 3
   rm -rf "$dir/classes" && mkdir -p "$dir/classes"
   # $PWD is evaluated AFTER the cd, so it already includes $dir
+  # stdout to /dev/null, but NOT stderr, and the compile must succeed —
+  # a docstring with an unescaped quote fails here (twice now), and
+  # swallowing stderr let the class-count guard pass on a STALE jar.
   ( cd "$dir" && CLJ_CONFIG=../.buildcfg clj -M -e \
-      "(binding [*compile-path* \"$PWD/classes\"] (doseq [n '($*)] (compile n)))" >/dev/null )
+      "(binding [*compile-path* \"$PWD/classes\"] (doseq [n '($*)] (compile n)))" >/dev/null ) \
+    || { echo "REFUSING $jar: compile failed (see error above)" >&2; exit 1; }
   jar cf "$jar" -C "$dir/classes" .
   [ -d "$dir/src" ] && (cd "$dir/src" && find . -name 'user.clj' -exec jar uf "../../$jar" {} \; ) || true
   local n; n=$(jar tf "$jar" | grep -c '\.class$')

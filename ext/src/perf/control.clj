@@ -17,7 +17,37 @@
 
   Var rebinding cannot touch what you cannot rebind: JDK internals,
   clojure.lang, direct-linked calls. That is where JDI earns its
-  complexity, and nowhere else."
+  complexity, and nowhere else.
+
+  FOR CODE YOU OWN, DO NOT USE THIS. Use farolero.
+
+  I wrote down that native restarts were a platform limit — conditions
+  being a language feature in SBCL and absent from the JVM. That was
+  wrong on both counts. CL's condition system is dynamic binding plus
+  non-local exit, and Clojure has both, so it is a LIBRARY question and
+  the library exists: org.suskalo/farolero, with restart-case,
+  handler-bind, invoke-restart, use-value, store-value, compute-restarts,
+  and block/return-from/tagbody/go besides.
+
+  Verified against the same test SBCL was given:
+
+    (defn risky [x]
+      (f/restart-case (if (zero? x) (f/error msg) (/ 100 x))
+        (::f/use-value [v] v)))
+
+    (f/handler-bind [::f/error (fn [c & _] (f/invoke-restart ::f/use-value 42))]
+      (risky 0))                        ;=> 42, same as SBCL
+
+  And the property that makes conditions worth having held: with five
+  intervening frames, the handler ran on a LIVE 51-frame stack — chosen
+  before unwinding, not after.
+
+  So what is JDI still for? The same thing SBCL's own debugger is for.
+  farolero, like CL, needs the restart ESTABLISHED — you must have
+  wrapped the call site. `restarts!` resumes a frame in code nobody
+  instrumented: a third-party library, clojure.lang, a JDK internal. That
+  is sb-debug's return-from-frame, not a workaround for a missing
+  language feature. Two tiers, and the cheap one is not this one."
   (:require [perf.capability :as cap]
             [clojure.string :as str]))
 
