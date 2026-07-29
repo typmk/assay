@@ -243,16 +243,78 @@
         (integer? ret) :long
         :else :object))
 
-;; The driven timing loop (arg fetch by index + result sink) is not free.
-;; The red-team measured its floor at ~13-14ns: an arg-independent constant
-;; form reported 13.46ns. Below this, absolute ns is harness-dominated.
-(def ^:private driver-floor-ns 15.0)
-
 (defn- round2 ^double [x]
   ;; (double x) because Math/round is overloaded on float and double and
   ;; a Number satisfies neither — reflective, in the namespace that
   ;; reports reflection, for the second time in this file.
   (/ (Math/round (* 100.0 (double x))) 100.0))
+
+;; ── self-calibration ──────────────────────────────────────────────
+;;
+;; Two numbers used to be frozen here: a driver floor of 15.0ns and a
+;; +/-5% verdict band. Both were measured ONCE, on one machine, in a past
+;; run, and stamped into defs — which is exactly the practice perf.code's
+;; docstring records having purged from note costs ("a rank-5 constant
+;; wearing a rank-1 label, in the tool built to catch exactly that").
+;; The principle was applied to what the tool REPORTS and not to what
+;; decides how it reports. A perf tool does not get to hardcode the
+;; threshold that determines whether it saw anything.
+;;
+;; Both are derivable, on THIS machine, from the harness itself:
+;;
+;;   FLOOR — time an arg-independent constant fn through the same runner.
+;;     Whatever it costs IS the harness; nothing below that is your code.
+;;
+;;   BAND — weigh that same form against ITSELF. The true factor is 1.0,
+;;     so every deviation observed is noise this machine produces at this
+;;     rep count. A verdict of "faster" must clear it.
+;;
+;; The band is now a property of the machine, so a quiet box resolves
+;; smaller wins than 5% and a noisy one honestly refuses to call wins it
+;; cannot see. Neither was possible with a constant.
+;;
+;; A delay: paid once per JVM, on first weigh, never at load.
+
+;; ── no band, no calibration step ──────────────────────────────────
+;;
+;; Three versions of this, and the last one deletes the other two.
+;;
+;;   1. A frozen +/-5% band, measured once on one machine in a past run.
+;;   2. A calibration pass at first use, deriving the band from the
+;;      harness weighed against itself. Better — it was at least THIS
+;;      machine — but still a constant, just frozen 200ms ago instead of
+;;      a year ago. It measured T0 and was applied at T1, across which
+;;      JIT state, frequency scaling and thermals all drift. Cold on the
+;;      first attempt it reported a 137.86ns floor against a known 13.46,
+;;      and warmed it still claimed a 1.28 band on an idle 20-core box —
+;;      asserting the machine could not resolve 28%, which is false.
+;;   3. No band at all, because the measurement already contains it.
+;;
+;; The trials are PAIRED — [[a1 b1] [a2 b2] ...], the two forms alternated
+;; within each trial — so drift common to both cancels inside the pair.
+;; `factors` is therefore already a set of noise-cancelled ratios taken
+;; under the exact conditions of the comparison, and `[lo hi]` is already
+;; the spread. If every paired trial put the alternative ahead, it is
+;; ahead; if the range straddles parity, the run cannot tell. That is the
+;; whole rule, and it needs no constant.
+;;
+;; It also scales the right way on its own: under a true null the chance
+;; that all N pairs agree in sign is 0.5^N, so confidence is a function of
+;; `trials`, which the caller already controls. Reported as
+;; :sign-confidence rather than assumed.
+
+(defn- verdict-of
+  "Faster / slower / inconclusive from the PAIRED spread alone."
+  [lo hi faster slower]
+  (cond (> lo 1.0) faster
+        (< hi 1.0) slower
+        :else :perf.weigh/inconclusive))
+
+(defn- sign-confidence
+  "Probability this sign agreement is not chance, under a true null:
+  1 - 0.5^trials. Derived from the trial count, not chosen."
+  [trials]
+  (round2 (- 1.0 (Math/pow 0.5 (double trials)))))
 
 (defn same?
   "Do two results agree? Numbers compare by VALUE with a float tolerance —
@@ -312,6 +374,8 @@
            med (fn [xs] (nth (sort xs) (quot (count xs) 2)))
            factors (mapv (fn [[a b]] (/ a b)) pairs)
            lo (apply min factors) hi (apply max factors)
+           ;; the harness's own cost, measured here rather than remembered
+           floor  (bench-form '(fn [& _] 1) samples reps :long)
            a-form (alloc-per-call form samples sink)
            a-alt  (alloc-per-call against samples sink)
            as-w (round2 (med (map first pairs)))
@@ -324,18 +388,22 @@
                     :alternative-bytes a-alt
                     :bytes-saved (- a-form a-alt)
                     :trials trials
-                    :verdict (cond (> lo 1.05) :perf.weigh/alternative-is-faster
-                                   (< hi 0.95) :perf.weigh/alternative-is-slower
-                                   :else :perf.weigh/inconclusive)
+                    :verdict (verdict-of lo hi
+                                         :perf.weigh/alternative-is-faster
+                                         :perf.weigh/alternative-is-slower)
+                    :sign-confidence (sign-confidence trials)
                     :basis :perf.cost.basis/measured
                     :reps reps
                     :samples-used (count samples)
                     :fold-risk (< (count samples) 2)
-                    ;; the driver loop (arg fetch + sink) has a ~13ns floor —
-                    ;; red-team measured it. Below it, ABSOLUTE ns is
-                    ;; harness-dominated (the ratio still cancels the common
-                    ;; overhead, so :factor stays meaningful). Say so.
-                    :below-floor? (< (min as-w alt) driver-floor-ns)
+                    ;; The floor is measured IN THIS RUN — same samples,
+                    ;; same reps, same sink, same thermal and JIT state —
+                    ;; not at init, because a floor from init is a
+                    ;; constant again. Below it, ABSOLUTE ns is
+                    ;; harness-dominated (the ratio still cancels the
+                    ;; common overhead, so :factor stays meaningful).
+                    :floor-ns (round2 floor)
+                    :below-floor? (< (min as-w alt) floor)
                     :same-result (same? ret ret')
                     :alternative against})
    (let [before (code/notes* form)]
@@ -371,9 +439,10 @@
                       ;; the spread straddles parity the run cannot tell
                       ;; you which is faster, and should say so rather
                       ;; than quote its median with a straight face.
-                      :verdict (cond (> lo 1.05) :perf.weigh/hinting-is-faster
-                                     (< hi 0.95) :perf.weigh/hinting-is-slower
-                                     :else :perf.weigh/inconclusive)
+                      :verdict (verdict-of lo hi
+                                           :perf.weigh/hinting-is-faster
+                                           :perf.weigh/hinting-is-slower)
+                      :sign-confidence (sign-confidence trials)
                       :basis :perf.cost.basis/measured
                       :reps reps
                       :notes-before (count before)

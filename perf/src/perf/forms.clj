@@ -265,7 +265,11 @@
                    (catch Throwable _ nil)))
          factor (:perf.weigh/factor w)
          bytes  (:perf.weigh/bytes-saved w)
-         cheaper? (or (and factor (> factor 1.05)) (and bytes (pos? bytes)))]
+         ;; no threshold of our own: weigh's PAIRED trials already decide
+         ;; whether the run could tell, so defer to its verdict rather
+         ;; than re-testing its median against a number we picked.
+         cheaper? (or (= (:perf.weigh/verdict w) :perf.weigh/alternative-is-faster)
+                      (and bytes (pos? bytes)))]
      #:perf.forms{:candidate candidate
                   :equivalent equiv?
                   :samples (:perf.forms/samples eq)
