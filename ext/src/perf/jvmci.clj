@@ -21,6 +21,7 @@
   WARM (driven thousands of times) before its profile is populated — the
   caller drives it, this reads it. Same shape as `perf.code/native`: you ran
   it, now inspect what the machine recorded."
+  (:require [perf.code])
   (:import [jdk.vm.ci.runtime JVMCI]
            [jdk.vm.ci.meta MetaAccessProvider ProfilingInfo JavaTypeProfile
             JavaTypeProfile$ProfiledType TriState]))
@@ -71,3 +72,84 @@
   "Is JVMCI reachable here? False on a stock JVM or without the exports."
   []
   (try (some? (meta-access)) (catch Throwable _ false)))
+
+;; ── notes from the JIT's profile ──────────────────────────────────
+;;
+;; MEASURED, this JVM: `profile` returns type data ONLY where the site has
+;; a RECEIVER. A protocol call reported its three implementors at 33.3%
+;; each; (.length s) over String and StringBuilder reported exactly the
+;; 2:1 mix it was fed. A boxed (+ (* a b) a) driven 500k times reported
+;; ZERO type entries — it compiles to invokestatic Numbers.add(Object,
+;; Object), and a static call has no receiver to profile. Argument types
+;; live in HotSpot's ParametersTypeData, which JVMCI's public
+;; ProfilingInfo does not expose.
+;;
+;; So this does NOT recover "the compiler said Object, every call passed a
+;; Long" — that remains `code/types` with sample args. What it does give,
+;; and nothing else in the toolkit can, is the site the JIT gave up on.
+
+;; TypeProfileWidth IS NOT THE THRESHOLD, and using it was a bug caught by
+;; measurement: it is the RECORDING width — how many receiver types the
+;; profiler will store — and it varies by VM. MEASURED: Red Hat OpenJDK 25
+;; sets 2, GraalVM CE 25 sets 8. Dispatch behaviour does not differ between
+;; them; only how much the profiler remembers does. Thresholding on it made
+;; a site that is megamorphic on both report on neither.
+;;
+;; The real limit is structural and fixed: HotSpot's inline cache is
+;; monomorphic (1 type), C2 will emit a bimorphic guard (2), and at 3 or
+;; more it falls back to a vtable/itable lookup it cannot inline through.
+;; That is the same class of claim as "reflection resolves by name on every
+;; call" in perf.code/kind-order — a rank-3 statement about how the
+;; mechanism works, not a magnitude.
+
+(def ^:private inline-cache-limit
+  "Receiver types HotSpot can still dispatch without a vtable lookup:
+  1 monomorphic, 2 bimorphic. Above this the site is megamorphic."
+  2)
+
+(defn- type-profile-width
+  "The VM's receiver-type RECORDING width — context, not threshold. When
+  the observed count reaches it the profile may be truncated, which is why
+  the note carries it: `3 of 8 recorded` and `8 of 8 recorded` are
+  different claims about completeness."
+  []
+  (or (try (-> (java.lang.management.ManagementFactory/getPlatformMXBean
+                com.sun.management.HotSpotDiagnosticMXBean)
+               (.getVMOption "TypeProfileWidth")
+               .getValue
+               parse-long)
+           (catch Throwable _ nil))
+      inline-cache-limit))
+
+(defn notes
+  "Megamorphic call sites in FN, as notes — the JIT's own measurement,
+  in the same shape perf.code emits, so it ranks, tiers and muffles
+  identically. F must be WARM; an unprofiled fn correctly yields [].
+
+  A site is reported when it observed MORE distinct receiver types than
+  HotSpot can dispatch without a vtable lookup — see `inline-cache-limit`,
+  which is NOT TypeProfileWidth.
+
+    (dotimes [_ 500000] (f x))
+    (perf.jvmci/notes f)"
+  [f]
+  (let [w (type-profile-width)]
+    (perf.code/report
+     (for [e (profile f)
+           :let [ts (remove #(= :other (first %)) (:perf.jvmci/types e))
+                 n  (count ts)]
+           :when (> n inline-cache-limit)]
+       #:perf.note{:code :perf.note/megamorphic
+                   :severity (perf.code/severity :perf.note/megamorphic)
+                   :span {:perf/file nil
+                          :perf/line nil
+                          :perf/col (:perf.jvmci/bci e)}
+                   :message (format "%s receiver types at %s bci %s (%s of %s recorded%s)"
+                                    n (:perf.jvmci/method e) (:perf.jvmci/bci e) n w
+                                    (if (>= n w) "; profile may be truncated" ""))
+                   ;; taken/refused, the same two keys the boxed-math note
+                   ;; carries: what the JIT settled for, and the inlining
+                   ;; it declined. Read off the profile, not remembered.
+                   :taken "vtable/itable dispatch"
+                   :refused ["monomorphic inline cache"]
+                   :observed (vec (sort-by (comp - second) ts))}))))

@@ -96,8 +96,16 @@
 ;; form and its hinted rewrite and times them. That number is the only
 ;; measured one, it is derived live, and it is never stored.
 
+;; megamorphic sits between them, and by the same structural argument.
+;; A megamorphic call site defeats the inline cache: the JIT must resolve
+;; through a vtable/itable on every call AND cannot inline through it, so
+;; the cost compounds into everything downstream of the site. That is
+;; per-call dispatch, like reflection, but without the name-based lookup
+;; and access check — cheaper than reflection, categorically heavier than
+;; allocating a box. Still no magnitude: `weigh` owns that.
 (def ^:private kind-order
-  [:perf.note/reflection :perf.note/boxed-math :perf.note/boxed-body])
+  [:perf.note/reflection :perf.note/megamorphic
+   :perf.note/boxed-math :perf.note/boxed-body])
 
 (defn kind-rank
   "Ordinal for sorting notes worst-first, by MECHANISM (see kind-order) —
@@ -105,6 +113,86 @@
   [note-code]
   (or (first (keep-indexed (fn [i k] (when (= k note-code) i)) kind-order))
       99))
+
+;; ── severity ──────────────────────────────────────────────────────
+;;
+;; SBCL tiers its advisories — note < style-warning < warning — so a
+;; reader can skim one level and act on another. Every note here carried
+;; :perf.severity/warning, the only value in the codebase, which makes the
+;; key a constant: it cannot separate anything from anything.
+;;
+;; The tiers derive from the SAME structural claim kind-order already
+;; makes, so this authors no new judgement. Reflection resolves a member
+;; by name and signature on EVERY call — a lookup plus an access check,
+;; and the receiver type is unknown, so it is also a correctness smell.
+;; Boxing allocates one small object per operation: real, bounded, and
+;; often irrelevant off a hot path. Categorically different, one axis.
+;;
+;; Still no magnitude. Severity says which MECHANISM you are looking at,
+;; not how much it costs you here — that remains `weigh`'s to measure.
+
+(def ^:private severity-of
+  {:perf.note/reflection  :perf.severity/warning
+   :perf.note/megamorphic :perf.severity/warning
+   :perf.note/boxed-math  :perf.severity/note
+   :perf.note/boxed-body  :perf.severity/note})
+
+(defn severity
+  "Tier for a note code: :perf.severity/warning for per-call member
+  resolution, :perf.severity/note for per-op allocation. Unknown codes
+  tier as :perf.severity/note rather than silently as warning — a new
+  source should not inherit the loudest level by default."
+  [note-code]
+  (get severity-of note-code :perf.severity/note))
+
+;; ── muffling ──────────────────────────────────────────────────────
+;;
+;; SBCL has sb-ext:*muffled-warnings* and a local
+;; (declare (sb-ext:muffle-conditions sb-ext:compiler-note)). Without an
+;; equivalent, `watch!` — which is the whole point, notes on every compile
+;; — hands you every boxed-math note in every namespace you load,
+;; including the ones you have already decided are fine. A diagnostic you
+;; learn to ignore has the same value as no diagnostic.
+;;
+;; A set of note codes, not a predicate over notes: it is the cheapest
+;; thing that composes with `binding`, and it is data, so a client can
+;; show what is currently muffled. Both a dynamic binding (scoped) and a
+;; root setter (session-wide), the same shape watch!/unwatch! already use.
+
+(def ^:dynamic *muffled*
+  "Note codes to drop from every reporting path. See `muffle!`."
+  #{})
+
+(defn muffle!
+  "Root-set the muffled note codes for this session; returns the new set.
+  (muffle!) with no args clears. Scoped muffling is
+  (binding [code/*muffled* #{:perf.note/boxed-math}] ...)."
+  ([] (muffle! #{}))
+  ([codes]
+   (let [s (set codes)]
+     (alter-var-root #'*muffled* (constantly s))
+     ;; the thread-local shadows the root, exactly as in watch! — without
+     ;; this, muffle! at a REPL sets a root nobody reads.
+     (try (var-set #'*muffled* s) (catch Throwable _ nil))
+     s)))
+
+(defn- unmuffled
+  "Drop muffled notes. The one filter every reporting path routes through,
+  so muffling cannot apply in `notes` and leak through `watched`."
+  [notes]
+  (if (seq *muffled*)
+    (vec (remove #(contains? *muffled* (:perf.note/code %)) notes))
+    (vec notes)))
+
+(defn report
+  "Rank NOTES worst-first by mechanism and drop the muffled ones — the one
+  reporting boundary. PUBLIC because it is the seam a new note SOURCE
+  needs: perf.jvmci derives notes from the JIT's profile rather than from
+  the compiler's stderr, and it must land in the same order, under the
+  same muffling, or `muffle!` would silently apply to some notes and not
+  others depending on where they came from."
+  [notes]
+  (vec (sort-by #(kind-rank (:perf.note/code %)) (unmuffled notes))))
 
 ;; ── naming ────────────────────────────────────────────────────────
 ;; Used by both the notes rung and the types rung, so it lives above
@@ -203,7 +291,7 @@
         :let [c (code-of kind)]]
     (merge
      #:perf.note{:code c
-                 :severity :perf.severity/warning
+                 :severity (severity c)
                  :span {:perf/file (when-not (= file "NO_SOURCE_PATH") file)
                         :perf/line (parse-long line)
                         :perf/col (parse-long col)}
@@ -295,7 +383,7 @@
         (refer-clojure)
         (try (eval form) (catch Throwable _ nil)))
       (finally (remove-ns (ns-name tmp))))
-    (vec (sort-by #(kind-rank (:perf.note/code %)) (parse-warnings (str w))))))
+    (report (parse-warnings (str w)))))
 
 (defmacro notes
   "Compile-time notes for FORM, ranked by mechanism. See `notes*`.
@@ -325,9 +413,20 @@
         ;; `why` prose last of the data lines because it is the only
         ;; interpretation in the note. The fact leads; the explanation
         ;; trails.
-        (printf "note[%s]: %s\n" (name (:perf.note/code n)) (:perf.note/message n))
+        ;; The TIER leads, as SBCL's does ("note:" / "warning:"), so the
+        ;; level is skimmable down the left margin; the code follows in
+        ;; brackets because it is what you filter and muffle on.
+        (printf "%s[%s]: %s\n"
+                (name (or (:perf.note/severity n) (severity (:perf.note/code n))))
+                (name (:perf.note/code n))
+                (:perf.note/message n))
+        ;; Only when there IS a source location. A note derived from the
+        ;; JIT's profile is located by bytecode index, not a line, and
+        ;; printing "<form>:null:14" invents a position it does not have —
+        ;; the bci is already in the message.
         (let [{:perf/keys [file line col]} (:perf.note/span n)]
-          (printf "  --> %s:%s:%s\n" (or file "<form>") line col))
+          (when (or file line)
+            (printf "  --> %s:%s:%s\n" (or file "<form>") line col)))
         (when-let [e (:perf.note/emitted n)] (printf "   = emitted: %s\n" e))
         (when-let [t (:perf.note/taken n)] (printf "   = took:    %s\n" t))
         (when-let [r (seq (:perf.note/refused n))]
@@ -572,8 +671,7 @@
       ;; reported one note where unwatch! a moment later reported two —
       ;; the tool under-counting because it asked too early.
       (.flush ^java.io.Writer *err*)
-      (vec (sort-by #(kind-rank (:perf.note/code %))
-                    (parse-warnings (str sink)))))
+      (report (parse-warnings (str sink))))
     []))
 
 (defn unwatch!

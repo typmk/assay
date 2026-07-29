@@ -136,3 +136,14 @@
     ;; => [#:perf.note{:code :perf.note/reflection :span {...} :message ..}]"
   [form]
   `(perf.code/notes ~form))
+
+(defn muffle!
+  "Drop note codes from every reporting path — SBCL's *muffled-warnings*.
+  Reachable here because it is only worth having where `watch!` is: once
+  notes arrive on every compile, suppressing the ones you have judged is
+  what keeps the rest readable. See `perf.code/muffle!`.
+
+    (perf/muffle! #{:perf.note/boxed-math})   ; session-wide
+    (perf/muffle!)                            ; clear"
+  ([] (perf.code/muffle!))
+  ([codes] (perf.code/muffle! codes)))
