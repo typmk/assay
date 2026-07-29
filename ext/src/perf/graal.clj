@@ -143,3 +143,57 @@
                first)]
     (when m
       (node-stamps (build-graph (.lookupJavaMethod meta m))))))
+
+;; ── IGV handoff ───────────────────────────────────────────────────
+;;
+;; Getting a graph into the Ideal Graph Visualizer is a six-flag hunt, and
+;; getting it WRONG is silent — which is the whole reason this exists.
+;;
+;; MEASURED on GraalVM CE 25.0.2, and every line of it was a surprise:
+;;   * -XX:-UseJVMCINativeLibrary is REQUIRED. libgraal is the default and
+;;     produced no dumps at all.
+;;   * -Djdk.graal.Dump=:1 plus -Djdk.graal.DumpPath=DIR works, and needs
+;;     no PrintGraph setting — File is already the default.
+;;   * -Djdk.graal.MethodFilter is where it goes wrong quietly. Both
+;;     `user$hot*` and `user$hot.*` matched NOTHING and produced zero
+;;     files, while dropping the filter produced 200 .bgv files of JDK
+;;     internals. A filter that matches nothing and a run that dumped
+;;     nothing look identical from the outside.
+;;
+;; So the filter is not used. Dump everything, then select by FILE NAME —
+;; Graal writes the method signature into it
+;; ("HotSpotCompilation-1018[Long.hashCode(long)int].bgv"), so the
+;; selection is a string match on ground truth rather than a guess at a
+;; filter dialect. Slower and correct beats fast and silently empty.
+
+(defn igv-flags
+  "The JVM flags that actually produce IGV graphs, as a vector.
+  DIR is where the .bgv files land. Verified on GraalVM CE 25.0.2."
+  [dir]
+  ["-XX:-UseJVMCINativeLibrary"
+   "-Djdk.graal.Dump=:1"
+   (str "-Djdk.graal.DumpPath=" dir)])
+
+(defn igv-command
+  "A ready `clojure` command line that runs DRIVER-FORM with graph
+  dumping on. Paste it, then File > Open in IGV on the .bgv you want —
+  or call `dumps` to narrow them down first."
+  [dir driver-form]
+  (str "clojure "
+       (clojure.string/join " " (map #(str "-J" %) (igv-flags dir)))
+       " -M -e " (pr-str (pr-str driver-form))))
+
+(defn dumps
+  "The .bgv files under DIR, newest first, optionally only those whose
+  method signature contains MATCH. Graal puts the signature in the file
+  name, so this filters on what was actually compiled rather than on a
+  filter expression that may match nothing."
+  ([dir] (dumps dir nil))
+  ([dir match]
+   (->> (file-seq (java.io.File. ^String dir))
+        (filter #(.isFile ^java.io.File %))
+        (filter #(clojure.string/ends-with? (.getName ^java.io.File %) ".bgv"))
+        (filter #(or (nil? match)
+                     (clojure.string/includes? (.getName ^java.io.File %) (str match))))
+        (sort-by #(- (.lastModified ^java.io.File %)))
+        (mapv #(.getPath ^java.io.File %)))))

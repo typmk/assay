@@ -207,19 +207,36 @@
     (f)
     (- (.getThreadAllocatedBytes tmx tid) b0)))
 
-(defn- runner
-  "Eval a no-arg fn that drives FN-FORM over the rotated sample POOL exactly
-  REPS times, sinking every result into a primitive accumulator it returns.
-  Rotation defeats constant-folding; the returned sink defeats dead-code
-  elimination — the two failures the red-team's teardown found in the old
-  harness (a fixed arg let HotSpot fold the call to 0ns). The fingerprint
-  is zero-alloc for numeric returns (Double/hashCode over a primitive), so
-  it does not pollute the allocation measurement.
+;; ── the harness is criterium's; only the thunk is ours ────────────
+;;
+;; What used to live here was a hand-rolled benchmarking engine: its own
+;; warmup, its own iteration count, its own median-of-trials, its own
+;; dead-code and constant-fold defences. That is JMH's and criterium's
+;; job, both of which do it better and have been attacked by more people.
+;; The red-team broke this harness twice (a fixed sample arg let HotSpot
+;; fold a call to 0ns), it carried a frozen 15ns floor from another
+;; machine, and it measured a ~42ns floor here — high enough that boxed
+;; (+ a b) against a primitive rewrite came back unresolvable.
+;;
+;; So it is gone, and criterium — already a global dep, already behind
+;; perf/bench — owns warmup, sample count, bootstrapped confidence
+;; intervals and outlier detection.
+;;
+;; EXACTLY TWO THINGS STAY, because criterium cannot do them:
+;;
+;;   1. DIRECT-ARITY CALLS. criterium takes a thunk. Reaching a fn through
+;;      `apply` boxes its arguments, which is the precise property being
+;;      measured — an earlier closure-thunk did that and reported 0.14x.
+;;      So the thunk is eval'd with the call spelled out.
+;;   2. THE SAMPLE POOL. One fixed argument is constant-foldable. The
+;;      thunk walks the whole pool per invocation, so the per-call figure
+;;      is criterium's mean divided by the pool size.
 
-  One eval'd fn with direct-arity calls (no apply, no closure over the
-  args) so a primitive-hinted param keeps the invokePrim path — an earlier
-  thunk-closure boxed them and measured 0.14x."
-  [fn-form sample-tuples reps sink]
+(defn- pooled-thunk
+  "A no-arg fn walking the sample POOL once with direct-arity calls,
+  folding each result into a primitive accumulator it returns. Hand this
+  to criterium; divide its mean by (count sample-tuples)."
+  [fn-form sample-tuples sink]
   (let [n (count sample-tuples)
         k (count (first sample-tuples))
         i (gensym "i_") tv (gensym "tv_") t (gensym "t_") acc (gensym "acc_")
@@ -230,35 +247,64 @@
                :long   `(unchecked-add ~acc (Long/hashCode (long ~call)))
                `(unchecked-add ~acc (long (System/identityHashCode ~call))))]
     (binding [*warn-on-reflection* false *unchecked-math* false]
-      (eval `(fn []
-               (let [~tv ~(mapv vec sample-tuples) ~f ~fn-form]
+      (eval `(let [~tv ~(mapv vec sample-tuples) ~f ~fn-form]
+               (fn []
                  (loop [~i 0 ~acc 0]
-                   (if (< ~i ~reps)
-                     (let [~t (nth ~tv (rem ~i ~n))] (recur (unchecked-inc ~i) ~fold))
+                   (if (< ~i ~n)
+                     (let [~t (nth ~tv ~i)] (recur (unchecked-inc ~i) ~fold))
                      ~acc))))))))
 
-(defn- bench-form
-  "Median-free single timed pass: warm, then time REPS driven iterations,
-  return ns/call. weigh calls this per trial and takes the median across
-  trials — one shot is an anecdote."
-  [fn-form sample-tuples reps sink]
-  (let [warm  (runner fn-form sample-tuples 200000 sink)
-        drive (runner fn-form sample-tuples reps sink)]
-    (warm)
-    (let [t0 (System/nanoTime) r (drive) e (- (System/nanoTime) t0)]
-      (when (== (double r) ##Inf) (println r))     ; observe the sink
-      (/ (double e) reps))))
+(defn- bench*
+  "ns per call and a bootstrapped 95% interval, from criterium.
+  Returns [mean-ns lo-ns hi-ns]."
+  [fn-form sample-tuples sink]
+  (let [th (pooled-thunk fn-form sample-tuples sink)
+        n  (count sample-tuples)
+        r  ((code/resolve! 'criterium.core/quick-benchmark*) th {})
+        [m [lo hi]] (:mean r)
+        per (fn [s] (/ (* 1e9 (double s)) n))]
+    [(per m) (per lo) (per hi)]))
+
+;; ── ABBA, because order is a confound ─────────────────────────────
+;;
+;; Benchmarking arm A and then arm B is not a fair comparison: the JVM is
+;; warmer, or hotter, or differently scheduled by the time B runs, and
+;; that difference is charged to B. MEASURED: weighing a form against
+;; ITSELF this way returned `alternative-is-slower` — a false positive on
+;; the one input whose answer is known in advance, which is exactly the
+;; failure this namespace exists to prevent. The paired design that
+;; preceded criterium cancelled this by alternating within each trial;
+;; delegating the statistics threw the cancellation out with it.
+;;
+;; So run the arms A B B A. Under drift that is linear across the run,
+;; A's two measurements are centred at (t1+t4)/2 and B's at (t2+t3)/2 —
+;; the same instant — so drift cancels in the means instead of landing on
+;; whichever arm went second. The interval is the UNION of each arm's two
+;; runs: two runs that disagree should widen the interval and make the
+;; verdict inconclusive, which is the honest outcome when order and
+;; effect cannot be told apart.
+
+(defn- bench-counterbalanced
+  "Both arms, measured A B B A. Returns [a b], each [mean lo hi]."
+  [form-a form-b sample-tuples sink]
+  (let [a1 (bench* form-a sample-tuples sink)
+        b1 (bench* form-b sample-tuples sink)
+        b2 (bench* form-b sample-tuples sink)
+        a2 (bench* form-a sample-tuples sink)
+        combine (fn [[m1 l1 h1] [m2 l2 h2]]
+                  [(/ (+ m1 m2) 2.0) (min l1 l2) (max h1 h2)])]
+    [(combine a1 a2) (combine b1 b2)]))
 
 (defn- alloc-per-call
-  "Bytes FN-FORM allocates per call, averaged over the sample pool via
-  direct-arity driven calls — so only the fn's own allocation counts, not
-  apply's arg-seq. The :double/:long sink allocates nothing, so a
+  "Bytes FN-FORM allocates per call, over one pass of the sample pool via
+  direct-arity calls — so only the fn's own allocation counts, not apply's
+  arg-seq. The :double/:long sink allocates nothing, so a
   zero-allocation primitive rewrite reads as zero."
   ^long [fn-form sample-tuples sink]
-  (let [reps  (max (count sample-tuples) 2000)
-        drive (runner fn-form sample-tuples reps sink)]
-    (drive)                                        ; load classes first
-    (quot (alloc-bytes drive) reps)))
+  (let [n     (count sample-tuples)
+        drive (pooled-thunk fn-form sample-tuples sink)]
+    (dotimes [_ 100] (drive))                      ; load classes first
+    (quot (alloc-bytes drive) n)))
 
 (defn- sink-for [ret]
   (cond (and (number? ret) (not (integer? ret))) :double
@@ -273,70 +319,48 @@
 
 ;; ── self-calibration ──────────────────────────────────────────────
 ;;
-;; Two numbers used to be frozen here: a driver floor of 15.0ns and a
-;; +/-5% verdict band. Both were measured ONCE, on one machine, in a past
-;; run, and stamped into defs — which is exactly the practice perf.code's
-;; docstring records having purged from note costs ("a rank-5 constant
-;; wearing a rank-1 label, in the tool built to catch exactly that").
-;; The principle was applied to what the tool REPORTS and not to what
-;; decides how it reports. A perf tool does not get to hardcode the
-;; threshold that determines whether it saw anything.
+;; ── how the verdict is decided, in four versions ──────────────────
 ;;
-;; Both are derivable, on THIS machine, from the harness itself:
+;; Each replaced the last, and the last one owns no statistics at all.
 ;;
-;;   FLOOR — time an arg-independent constant fn through the same runner.
-;;     Whatever it costs IS the harness; nothing below that is your code.
-;;
-;;   BAND — weigh that same form against ITSELF. The true factor is 1.0,
-;;     so every deviation observed is noise this machine produces at this
-;;     rep count. A verdict of "faster" must clear it.
-;;
-;; The band is now a property of the machine, so a quiet box resolves
-;; smaller wins than 5% and a noisy one honestly refuses to call wins it
-;; cannot see. Neither was possible with a constant.
-;;
-;; A delay: paid once per JVM, on first weigh, never at load.
-
-;; ── no band, no calibration step ──────────────────────────────────
-;;
-;; Three versions of this, and the last one deletes the other two.
-;;
-;;   1. A frozen +/-5% band, measured once on one machine in a past run.
+;;   1. A frozen +/-5% band and a 15.0ns driver floor — measured once, on
+;;      one machine, in a past run, and stamped into defs. Exactly the
+;;      practice perf.code records having purged from note costs ("a
+;;      rank-5 constant wearing a rank-1 label, in the tool built to
+;;      catch exactly that"), applied to what the tool REPORTS but never
+;;      to what decides how it reports.
 ;;   2. A calibration pass at first use, deriving the band from the
-;;      harness weighed against itself. Better — it was at least THIS
-;;      machine — but still a constant, just frozen 200ms ago instead of
-;;      a year ago. It measured T0 and was applied at T1, across which
-;;      JIT state, frequency scaling and thermals all drift. Cold on the
-;;      first attempt it reported a 137.86ns floor against a known 13.46,
-;;      and warmed it still claimed a 1.28 band on an idle 20-core box —
-;;      asserting the machine could not resolve 28%, which is false.
-;;   3. No band at all, because the measurement already contains it.
+;;      harness weighed against itself. At least this machine — but still
+;;      a constant, frozen 200ms ago instead of a year ago, measured at
+;;      T0 and applied at T1 across which JIT state, frequency scaling
+;;      and thermals drift. Cold it reported a 137.86ns floor against a
+;;      known 13.46; warmed it claimed a 1.28 band on an idle 20-core
+;;      box, asserting the machine could not resolve 28%.
+;;   3. Paired trials, no band: alternate the two forms within each trial
+;;      so common-mode drift cancels, and call it only when every pair
+;;      agreed in sign. Sound, and constant-free.
+;;   4. THIS. criterium bootstraps a confidence interval per arm and the
+;;      verdict is whether the two intervals overlap.
 ;;
-;; The trials are PAIRED — [[a1 b1] [a2 b2] ...], the two forms alternated
-;; within each trial — so drift common to both cancels inside the pair.
-;; `factors` is therefore already a set of noise-cancelled ratios taken
-;; under the exact conditions of the comparison, and `[lo hi]` is already
-;; the spread. If every paired trial put the alternative ahead, it is
-;; ahead; if the range straddles parity, the run cannot tell. That is the
-;; whole rule, and it needs no constant.
-;;
-;; It also scales the right way on its own: under a true null the chance
-;; that all N pairs agree in sign is 0.5^N, so confidence is a function of
-;; `trials`, which the caller already controls. Reported as
-;; :sign-confidence rather than assumed.
+;; 3 was correct and still lost, which is the point worth recording. It
+;; was a statistics engine written here — resampling, spread, an implied
+;; significance level of 0.5^trials — competing with one that has had
+;; far more eyes on it and does outlier detection and bootstrapping
+;; properly. The paired design cancelled drift; criterium's interval
+;; measures it. Neither needs a threshold, and only one of them is this
+;; codebase's job to maintain.
 
 (defn- verdict-of
-  "Faster / slower / inconclusive from the PAIRED spread alone."
-  [lo hi faster slower]
-  (cond (> lo 1.0) faster
-        (< hi 1.0) slower
+  "Faster / slower / inconclusive from whether the two bootstrapped
+  confidence intervals OVERLAP. No threshold: if the intervals are
+  disjoint the run can tell them apart, and if they are not it cannot.
+  criterium bootstraps the interval from the samples it took, so the
+  resolution is a property of the measurement rather than a number
+  chosen in advance."
+  [[_ a-lo a-hi] [_ b-lo b-hi] faster slower]
+  (cond (> a-lo b-hi) faster
+        (> b-lo a-hi) slower
         :else :perf.weigh/inconclusive))
-
-(defn- sign-confidence
-  "Probability this sign agreement is not chance, under a true null:
-  1 - 0.5^trials. Derived from the trial count, not chosen."
-  [trials]
-  (round2 (- 1.0 (Math/pow 0.5 (double trials)))))
 
 (defn same?
   "Do two results agree? Numbers compare by VALUE with a float tolerance —
@@ -390,7 +414,7 @@
     (weigh '(reduce + (map * a b)) '{...}      ; the boxed original
            {:against '(let [^doubles a a ...] ...)})  ; your primitive rewrite"
   ([form args] (weigh form args {}))
-  ([form args {:keys [reps trials against] :or {reps 2000000 trials 5}}]
+  ([form args {:keys [against]}]
    (if against
      ;; EXPLICIT-alternative path. The notes gate does not apply: the whole
      ;; point is to measure a rewrite the compiler had nothing to say about.
@@ -401,38 +425,34 @@
            ret (apply f args) ret' (apply g args)
            samples (->samples args)
            sink (sink-for ret)
-           pairs (vec (for [_ (range trials)]
-                        [(bench-form form samples reps sink)
-                         (bench-form against samples reps sink)]))
-           med (fn [xs] (nth (sort xs) (quot (count xs) 2)))
-           factors (mapv (fn [[a b]] (/ a b)) pairs)
-           lo (apply min factors) hi (apply max factors)
-           ;; the harness's own cost, measured here rather than remembered
-           floor  (bench-form '(fn [& _] 1) samples reps :long)
+           [a b] (bench-counterbalanced form against samples sink)
+           ;; the harness's own cost, measured in this run alongside the
+           ;; two arms, not remembered from another machine
+           floor (first (bench* '(fn [& _] 1) samples :long))
            a-form (alloc-per-call form samples sink)
            a-alt  (alloc-per-call against samples sink)
-           as-w (round2 (med (map first pairs)))
-           alt  (round2 (med (map second pairs)))]
+           as-w (round2 (first a))
+           alt  (round2 (first b))]
        #:perf.weigh{:as-written-ns  as-w
                     :alternative-ns alt
-                    :factor (round2 (med factors))
-                    :factor-range [(round2 lo) (round2 hi)]
+                    :factor (round2 (/ (first a) (first b)))
+                    ;; the ratio's range from the two INTERVALS, worst and
+                    ;; best case, rather than from a spread of our own
+                    :factor-range [(round2 (/ (nth a 1) (nth b 2)))
+                                   (round2 (/ (nth a 2) (nth b 1)))]
+                    :as-written-ci [(round2 (nth a 1)) (round2 (nth a 2))]
+                    :alternative-ci [(round2 (nth b 1)) (round2 (nth b 2))]
                     :as-written-bytes a-form
                     :alternative-bytes a-alt
                     :bytes-saved (- a-form a-alt)
-                    :trials trials
-                    :verdict (verdict-of lo hi
+                    :verdict (verdict-of a b
                                          :perf.weigh/alternative-is-faster
                                          :perf.weigh/alternative-is-slower)
-                    :sign-confidence (sign-confidence trials)
                     :basis :perf.cost.basis/measured
-                    :reps reps
+                    :engine :perf.engine/criterium
                     :samples-used (count samples)
                     :fold-risk (< (count samples) 2)
-                    ;; The floor is measured IN THIS RUN — same samples,
-                    ;; same reps, same sink, same thermal and JIT state —
-                    ;; not at init, because a floor from init is a
-                    ;; constant again. Below it, ABSOLUTE ns is
+                    ;; Below the harness floor, ABSOLUTE ns is
                     ;; harness-dominated (the ratio still cancels the
                     ;; common overhead, so :factor stays meaningful).
                     :floor-ns (round2 floor)
@@ -449,35 +469,30 @@
              after (code/notes* rewrite)
              samples (->samples args)
              sink (sink-for ret)
-             ;; TRIALS, not one shot. Three runs of one small form gave
-             ;; 1.06, 0.79 and 1.54 — one of them claiming the FIXED
-             ;; version was slower. For a difference this small the noise
-             ;; exceeds the effect, and a single confident number would be
-             ;; the exact failure this tool exists to prevent. So:
-             ;; alternate the two, take medians, and report the spread.
-             pairs (vec (for [_ (range trials)]
-                          [(bench-form form samples reps sink)
-                           (bench-form rewrite samples reps sink)]))
-             med (fn [xs] (nth (sort xs) (quot (count xs) 2)))
-             factors (mapv (fn [[a b]] (/ a b)) pairs)
-             as-written (med (map first pairs))
-             rewritten (med (map second pairs))
-             lo (apply min factors) hi (apply max factors)]
-         #:perf.weigh{:as-written-ns (round2 as-written)
-                      :rewritten-ns (round2 rewritten)
-                      :factor (round2 (med factors))
-                      :factor-range [(round2 lo) (round2 hi)]
-                      :trials trials
+             ;; NOT ONE SHOT. Three runs of one small form once gave 1.06,
+             ;; 0.79 and 1.54 — one of them claiming the FIXED version was
+             ;; slower. For a difference this small the noise exceeds the
+             ;; effect, and a single confident number is the exact failure
+             ;; this tool exists to prevent. criterium answers that with a
+             ;; bootstrapped interval per arm; the verdict is then simply
+             ;; whether the two intervals overlap.
+             [a b] (bench-counterbalanced form rewrite samples sink)]
+         #:perf.weigh{:as-written-ns (round2 (first a))
+                      :rewritten-ns (round2 (first b))
+                      :factor (round2 (/ (first a) (first b)))
+                      :factor-range [(round2 (/ (nth a 1) (nth b 2)))
+                                     (round2 (/ (nth a 2) (nth b 1)))]
+                      :as-written-ci [(round2 (nth a 1)) (round2 (nth a 2))]
+                      :rewritten-ci [(round2 (nth b 1)) (round2 (nth b 2))]
                       ;; The verdict is about RESOLUTION, not just size: if
-                      ;; the spread straddles parity the run cannot tell
-                      ;; you which is faster, and should say so rather
-                      ;; than quote its median with a straight face.
-                      :verdict (verdict-of lo hi
+                      ;; the intervals overlap the run cannot tell you
+                      ;; which is faster, and should say so rather than
+                      ;; quote its point estimate with a straight face.
+                      :verdict (verdict-of a b
                                            :perf.weigh/hinting-is-faster
                                            :perf.weigh/hinting-is-slower)
-                      :sign-confidence (sign-confidence trials)
                       :basis :perf.cost.basis/measured
-                      :reps reps
+                      :engine :perf.engine/criterium
                       :notes-before (count before)
                       :notes-after (count after)
                       :verified (zero? (count after))
@@ -499,16 +514,16 @@
   honest single-form cost primitive; do not hand-roll another (an earlier
   #(apply f args) thunk added a ~120 B ChunkedSeq floor to every form).
 
-  ns comes from bench-form (200k-iteration warmup → C2 steady state), so
-  bytes and ns are read in the SAME regime. QUICK? skips the timed pass
-  (bytes only) for callers that must be cheap.
+  ns comes from criterium through the same pooled direct-arity thunk the
+  allocation figure uses, so bytes and ns are read in the SAME regime.
+  QUICK? skips the timed pass (bytes only) for callers that must be cheap.
 
   A LAZY return is NOT silently realised — forcing it would count realisation
   the caller has not asked for. Instead :perf.cost/lazy? flags it, so a
   measured `(map * a b)` reports honestly that the number is construction
   cost, not the traversal."
   ([fn-form args] (cost fn-form args {}))
-  ([fn-form args {:keys [quick? reps] :or {reps 200000}}]
+  ([fn-form args {:keys [quick?]}]
    (let [samples (->samples args)
          ret     (apply (eval fn-form) (first samples))     ; type the sink
          sink    (sink-for ret)
@@ -517,7 +532,7 @@
          bytes   (alloc-per-call fn-form samples sink)]
      (cond-> #:perf.cost{:bytes bytes :sink sink}
        lazy?        (assoc :perf.cost/lazy? true)
-       (not quick?) (assoc :perf.cost/ns (bench-form fn-form samples reps sink))))))
+       (not quick?) (assoc :perf.cost/ns (first (bench* fn-form samples sink)))))))
 
 ;; ── applying it ───────────────────────────────────────────────────
 
@@ -538,7 +553,7 @@
   nil when there is nothing to fix, or when the rewrite did not verify."
   ([form args] (fix form args {}))
   ([form args opts]
-   (let [w (weigh form args (merge {:trials 1 :reps 200000} opts))]
+   (let [w (weigh form args opts)]
      (when (:perf.weigh/verified w)
        #:perf.fix{:form (:perf.weigh/rewrite w)
                   ;; Reader metadata stripped: every form carries :line and
@@ -557,3 +572,49 @@
                   :notes-before (:perf.weigh/notes-before w)
                   :notes-after (:perf.weigh/notes-after w)}))))
 
+
+;; ── handing off to JMH ────────────────────────────────────────────
+;;
+;; The division of labour after the harness was cut. perf's unique half is
+;; DERIVING the alternative and VERIFYING it — the compiler disclosed what
+;; it refused, the rewrite silenced the notes, the values still match.
+;; None of that is a benchmark. criterium then gives an in-process number
+;; good enough to rank candidates, which is what `discover` needs.
+;;
+;; What criterium in-process cannot give is fork isolation: a fresh JVM
+;; per arm, so the first arm cannot warm, pollute the profile of, or
+;; deoptimise the second. That is JMH's whole reason to exist, and it is
+;; not worth rebuilding here — this session already deleted one hand-rolled
+;; benchmarking engine.
+;;
+;; So `handoff` emits what a JMH harness needs and nothing more: the two
+;; forms with their hints spelled out (the tags live in metadata and
+;; pr-str hides them, so a rewrite prints identical to the original), the
+;; sample args, and perf's own verdict for comparison. No JMH schema is
+;; invented here — the shape a runner wants is the runner's business, and
+;; guessing at one is how you ship something that never ran.
+
+(defn handoff
+  "Everything a JMH (or any out-of-process) harness needs for FORM and
+  its verified rewrite, as data. nil when there is nothing to hand off.
+
+    (measure/handoff '(fn [a b] (+ a b)) [3 4])"
+  ([form args] (handoff form args {}))
+  ([form args opts]
+   (let [w (weigh form args opts)
+         alt (or (:perf.weigh/rewrite w) (:perf.weigh/alternative w))]
+     (when alt
+       #:perf.handoff{:baseline form
+                      :candidate alt
+                      :hints (param-tags alt)
+                      :args args
+                      ;; source, because the hints are metadata and
+                      ;; pr-str drops them — the candidate would print
+                      ;; identical to the baseline and look like a no-op
+                      :candidate-source (binding [*print-meta* true] (pr-str alt))
+                      :verified (:perf.weigh/verified w)
+                      :in-process #:perf.handoff{:engine (:perf.weigh/engine w)
+                                                 :verdict (:perf.weigh/verdict w)
+                                                 :factor (:perf.weigh/factor w)
+                                                 :factor-range (:perf.weigh/factor-range w)}
+                      :why "criterium measures in-process; JMH forks a JVM per arm"}))))

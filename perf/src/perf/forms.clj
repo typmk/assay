@@ -252,8 +252,7 @@
   the sound outcome and cost oracles. Returns a record with the measured
   coordinates and the derived label — nothing authored."
   ([form candidate args] (classify form candidate args {}))
-  ([form candidate args {:keys [reps trials samples]
-                         :or {reps 500000 trials 5 samples 40}}]
+  ([form candidate args {:keys [samples] :or {samples 40}}]
    (let [eq (equivalent? form candidate args samples)
          equiv? (:perf.forms/equivalent eq)
          ;; only price an EQUIVALENT candidate — cost is moot for a differing
@@ -261,13 +260,14 @@
          ;; (e.g. an op-swap to (reduce * ...) overflows), which must not
          ;; crash the classifier. Guard anyway.
          w  (when equiv?
-              (try (measure/weigh form args {:against candidate :reps reps :trials trials})
+              (try (measure/weigh form args {:against candidate})
                    (catch Throwable _ nil)))
          factor (:perf.weigh/factor w)
          bytes  (:perf.weigh/bytes-saved w)
-         ;; no threshold of our own: weigh's PAIRED trials already decide
-         ;; whether the run could tell, so defer to its verdict rather
-         ;; than re-testing its median against a number we picked.
+         ;; no threshold of our own: weigh's confidence intervals already
+         ;; decide whether the run could tell, so defer to its verdict
+         ;; rather than re-testing its point estimate against a number
+         ;; we picked.
          cheaper? (or (= (:perf.weigh/verdict w) :perf.weigh/alternative-is-faster)
                       (and bytes (pos? bytes)))]
      #:perf.forms{:candidate candidate
