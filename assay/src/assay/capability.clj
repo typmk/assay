@@ -25,10 +25,20 @@
   "capability -> {:available? fn :needs str :remedy str :alias str?}
 
   :alias is the ONE alias that supplies the capability, or nil when no
-  alias can (a JDK feature, or a file on disk). `report` folds the aliases
-  of everything missing into a single launch line — three missing
-  capabilities used to mean three remedy strings for the reader to merge
-  by hand, which is a step a machine can take and a reader will get wrong."
+  alias can (a JDK feature, a file on disk, or a JVM flag that JAVA_OPTS
+  now carries). `report` folds the aliases of everything missing into a
+  single launch line — three missing capabilities used to mean three
+  remedy strings for the reader to merge by hand, which is a step a
+  machine can take and a reader will get wrong.
+
+  THERE IS NO :assay ALIAS. The flags it used to carry live in JAVA_OPTS,
+  exported from the shell profile, because the clojure CLI interpolates
+  $JAVA_OPTS into the exec that starts the JVM, while a root-level
+  :jvm-opts in deps.edn is IGNORED — measured, the property comes back
+  nil. An alias was the only other seam, and an alias is exactly what five
+  projects on this machine already shadow by defining their own. Cost of
+  always-on, measured ABBA-interleaved at n=12: +0.005s on a 0.620s
+  startup, 0.8%."
   {:jfr        {:available? #(class-present? "jdk.jfr.consumer.RecordingStream")
                 :needs "jdk.jfr"
                 :remedy "present on any modern JDK"
@@ -47,17 +57,17 @@
    :self-attach {:available? #(when-let [s (prop "jdk.attach.allowAttachSelf")]
                                 (or (= "" s) (Boolean/parseBoolean s)))
                  :needs "-Djdk.attach.allowAttachSelf (bare, or =true)"
-                 :remedy "clj -M:assay  — required by mem/ and by nREPL's hard interrupt"
-                 :alias "assay"}
+                 :remedy "JAVA_OPTS (shell profile) — required by mem/ and by nREPL's hard interrupt"
+                 :alias nil}
    :nmt        {:available? #(jvm-arg? #"NativeMemoryTracking")
                 :needs "-XX:NativeMemoryTracking=summary"
-                :remedy "clj -M:assay"
-                :alias "assay"}
+                :remedy "JAVA_OPTS (shell profile)"
+                :alias nil}
    :debug-nonsafepoints
                {:available? #(jvm-arg? #"DebugNonSafepoints")
                 :needs "-XX:+UnlockDiagnosticVMOptions -XX:+DebugNonSafepoints"
-                :remedy "clj -M:assay — without it profiler frames land on wrong lines"
-                :alias "assay"}
+                :remedy "JAVA_OPTS (shell profile) — without it profiler frames land on wrong lines"
+                :alias nil}
    :hsdis      {:available? #(.exists (java.io.File. (str (prop "user.home")
                                                           "/.clojure/dev/lib/hsdis-amd64.so")))
                 :needs "hsdis-amd64.so"
