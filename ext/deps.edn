@@ -1,4 +1,4 @@
-;; perf-ext — the things that are NOT "observe a running JVM":
+;; assay-ext — the things that are NOT "observe a running JVM":
 ;;   diagnose  compile-time cost notes   (different input, different lifecycle)
 ;;   control   trace + JDI restarts      (a debugger)
 ;;   native    FFM safety tiers          (a different domain)
@@ -6,7 +6,7 @@
 ;;   trace     Sayid bridge              (function value tracing)
 ;;   remote    JDI over a socket         (the CDT architecture)
 ;;   nrepl     the op-contract seam      (source-loaded middleware, not AOT'd)
-;; They ride on perf's model but are not needed to use it. AOT'd into the
+;; They ride on assay's model but are not needed to use it. AOT'd into the
 ;; always-on jar they would load on every JVM start, so they are opt-in.
 {:paths ["src"]
- :deps {dev/perf {:local/root "../perf"}}}
+ :deps {dev/assay {:local/root "../assay"}}}

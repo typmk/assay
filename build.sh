@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Build the AOT jars. perf is always-on (global :deps); ext is opt-in.
+# Build the AOT jars. assay is always-on (global :deps); ext is opt-in.
 #
-# WHY AOT: shipped as SOURCE, perf compiles at every JVM start on this
+# WHY AOT: shipped as SOURCE, assay compiles at every JVM start on this
 # machine — measured ~1.0s added to every clj, every script, every build.
 # AOT-compiled it costs ~0.2s.
 #
@@ -9,7 +9,7 @@
 # classpath, so `compile` would load the already-AOT'd namespaces and emit
 # nothing. A tool's output must not be an input to the build that makes it.
 #
-# While HACKING, skip this: (load-file ".../src/perf/query.clj") in a REPL
+# While HACKING, skip this: (load-file ".../src/assay/query.clj") in a REPL
 # overrides the AOT'd namespace with no rebuild.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -32,5 +32,5 @@ build () {                       # dir  jar  min-classes  ns...
   echo "$jar: $n classes, $(stat -c%s "$jar") bytes"
 }
 
-build perf perf.jar 100 perf.model perf.capability perf.capture perf.query perf.code perf.measure perf.range perf.forms perf.repl perf.explain perf
-build ext  perf-ext.jar 40 perf.diagnose perf.control perf.native perf.flow perf.trace perf.remote perf.jit
+build assay assay.jar 100 assay.model assay.capability assay.capture assay.query assay.code assay.measure assay.range assay.forms assay.repl assay.explain assay
+build ext  assay-ext.jar 40 assay.diagnose assay.control assay.native assay.flow assay.trace assay.remote assay.jit
