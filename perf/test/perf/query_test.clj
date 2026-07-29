@@ -27,10 +27,20 @@
     (is (= "app/cold" (:perf/fn second-)))))
 
 (deftest allocation-excludes-noise
-  (testing "clojure.* and the tooling's own frames are never sites"
+  ;; This used to assert against a hardcoded prefix list, so it could name
+  ;; any namespace it liked — "nrepl.server/handle" was excluded whether or
+  ;; not nrepl was anywhere near the classpath. Ownership is now DERIVED
+  ;; from where the namespace's file actually lives, which is more honest
+  ;; and costs exactly this: the test must name namespaces really present,
+  ;; and perf's own frames resolve differently depending on whether the
+  ;; suite ran against the jar or against src. What holds either way is the
+  ;; jar rule, so that is what is asserted.
+  (testing "a namespace that demonstrably comes from a JAR is never a site"
     (is (empty? (q/allocation [(obs :perf.kind/alloc "clojure.core/vec")
-                               (obs :perf.kind/alloc "perf/watch")
-                               (obs :perf.kind/alloc "nrepl.server/handle")])))))
+                               (obs :perf.kind/alloc "clojure.string/join")]))))
+  (testing "one that cannot be proven foreign is KEPT — hiding your own hot
+            code is the more expensive of the two errors"
+    (is (seq (q/allocation [(obs :perf.kind/alloc "app/handler")])))))
 
 (deftest blocking-sums-durations
   (let [data [(obs :perf.kind/block "app/lock" :perf.block/duration-ns 100)

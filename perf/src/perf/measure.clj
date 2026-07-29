@@ -108,15 +108,37 @@
 ;; because it looks right; it is trusted because the compiler stopped
 ;; complaining and the clock agreed.
 
+;; WHICH primitive hints exist is not remembered here, it is read off
+;; clojure.lang.IFn. Clojure emits one nested interface per primitive
+;; signature it supports — IFn$LO, IFn$DDL and so on — where each letter
+;; is a parameter or return type. Collect the distinct letters across all
+;; 358 of them and you get exactly #{L D O}: long, double, Object. That is
+;; the runtime stating its own capability, and it stays correct if a
+;; future Clojure adds a third.
+(def ^:private prim-hints
+  (delay
+    (let [letters (->> (.getClasses clojure.lang.IFn)
+                       (map #(.getSimpleName ^Class %))
+                       (filter #(re-matches #"[LDO]+" %))
+                       (mapcat seq)
+                       set)]
+      (cond-> #{}
+        (letters \L) (conj 'long)
+        (letters \D) (conj 'double)))))
+
 (defn- tag-for
   "The hint the compiler would have wanted for a value of this class.
-  Clojure has exactly two primitive hints for fn params — ^long and
-  ^double. Everything else hints as its class."
+  The primitive hints come from `prim-hints` (read off IFn); which of
+  them a boxed class widens to comes from the JVM's own numeric tower —
+  integral boxes widen to the integral hint, floating to the floating
+  one. Everything else hints as its class."
   [^Class c]
-  (condp = c
-    Long 'long, Integer 'long, Short 'long, Byte 'long
-    Double 'double, Float 'double
-    (symbol (.getName c))))
+  (let [hints @prim-hints
+        integral? (contains? #{Long Integer Short Byte} c)
+        floating? (contains? #{Double Float} c)]
+    (cond (and integral? (hints 'long))   'long
+          (and floating? (hints 'double)) 'double
+          :else (symbol (.getName c)))))
 
 (defn- primitive-tag? [t] (#{'long 'double} t))
 
@@ -331,7 +353,18 @@
   [a b]
   (cond
     (and (number? a) (number? b))
-    (or (== a b) (< (Math/abs (- (double a) (double b))) 1e-9))
+    ;; The tolerance is the ULP at the magnitude being compared, not a
+    ;; 1e-9 literal. Two reasons, and the second is a bug the constant
+    ;; was hiding: ulp is the actual resolution of a double, so this is
+    ;; derived rather than chosen — and it SCALES. Measured: ulp(1e9) is
+    ;; 1.19e-7, forty times larger than 1e-9, so two adjacent
+    ;; representable doubles near a billion differ by more than the old
+    ;; epsilon allowed and a legitimate rewrite was reported as changing
+    ;; the answer. Near zero it tightens for the same reason.
+    (or (== a b)
+        (let [x (double a) y (double b)
+              scale (Math/max (Math/abs x) (Math/abs y))]
+          (<= (Math/abs (- x y)) (Math/ulp scale))))
     (and (sequential? a) (sequential? b) (= (count a) (count b)))
     (every? true? (map same? a b))
     :else (= a b)))

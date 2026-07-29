@@ -198,12 +198,12 @@
 ;; Used by both the notes rung and the types rung, so it lives above
 ;; both rather than beside whichever one happened to need it first.
 
-(def ^:private prim-names
-  {Long/TYPE 'long Double/TYPE 'double Integer/TYPE 'int Float/TYPE 'float
-   Boolean/TYPE 'boolean Character/TYPE 'char Byte/TYPE 'byte
-   Short/TYPE 'short Void/TYPE 'void})
-
-(defn- tname [^Class c] (or (prim-names c) (symbol (.getSimpleName c))))
+;; There was a nine-entry table mapping Long/TYPE -> 'long and so on. The
+;; JVM already answers this: getSimpleName on a primitive Class returns
+;; its source-level name ("long", "int", "void"), identical to what the
+;; table said. A lookup table that agrees with the runtime in every entry
+;; is a copy of the runtime that can fall out of date with it.
+(defn- tname [^Class c] (symbol (.getSimpleName c)))
 
 ;; ── rung 1: notes ─────────────────────────────────────────────────
 

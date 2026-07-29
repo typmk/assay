@@ -66,13 +66,52 @@
 
 ;; ── Frames ────────────────────────────────────────────────────────
 
-(def ^:private noise-prefixes
-  ;; Note the SLASH forms: after demunging, perf$watch is "perf/watch", so
-  ;; a "perf." check never matches and the profiler shows up in its own
-  ;; output. Tooling namespaces are excluded for the same reason —
-  ;; observing costs something, and charging that to the user is a lie.
-  ["java." "jdk." "sun." "clojure." "perf." "perf/"
-   "cider." "nrepl." "orchard." "criterium." "malli."])
+;; WHOSE CODE IS IT — derived from the classpath, not a name list.
+;;
+;; This was eleven hardcoded prefixes ("clojure." "cider." "nrepl." ...).
+;; Every one was a guess about what a dependency is called, so it was
+;; wrong in both directions: a dependency nobody thought to list showed
+;; up as YOUR hot code, and a namespace of yours that happened to start
+;; with a listed prefix vanished from your own profile.
+;;
+;; The classpath already draws this line and the JVM will show it to you.
+;; A DIRECTORY on the classpath is source you are editing; a JAR is
+;; something you depend on. So: resolve the namespace's own file and ask
+;; which kind of classpath entry it came from — a "file:" URL is yours, a
+;; "jar:" URL is not, and a frame with no resolvable namespace (raw Java)
+;; is not either. Nothing to maintain, and it follows the project.
+;;
+;; Cached per NAMESPACE, not per frame: the resolution is a resource
+;; lookup and namespaces are few, where frames are many.
+
+(def ^:private ^java.util.concurrent.ConcurrentHashMap ns-own-cache
+  (java.util.concurrent.ConcurrentHashMap. 256))
+
+(defn- ns-owned?
+  "Does NS-NAME's source sit under a classpath DIRECTORY (yours) rather
+  than inside a jar (a dependency)?
+
+  The test is EXCLUSION, not inclusion — a frame is dropped only when it
+  can be PROVEN to come from a jar:
+    jar:  URL  — demonstrably a dependency. Not yours.
+    file: URL  — a classpath directory. Yours.
+    NO URL     — REPL-defined, or a namespace this process cannot see.
+                 Yours, by default.
+
+  The default direction is load-bearing and it is the cheaper error. A
+  false positive shows you a frame you did not write; a false negative
+  HIDES your own hot code from the profile that exists to find it. The
+  prefix list this replaced had the same bias, by accident — anything it
+  had not been told about was yours. This keeps the bias and makes the
+  half it can decide actually derived."
+  [^String ns-name]
+  (try
+    (let [path (-> ns-name (str/replace "-" "_") (str/replace "." "/"))
+          ldr  (clojure.lang.RT/baseLoader)
+          url  (or (.getResource ldr (str path ".clj"))
+                   (.getResource ldr (str path ".cljc")))]
+      (not (and url (= "jar" (.getProtocol url)))))
+    (catch Throwable _ true)))
 
 ;; ── name caches ───────────────────────────────────────────────────
 ;;
@@ -106,19 +145,30 @@
 (def ^:private ^java.util.concurrent.ConcurrentHashMap own-cache
   (java.util.concurrent.ConcurrentHashMap. 512))
 
+(def ^:private ns-own-fn
+  (reify java.util.function.Function
+    (apply [_ s] (Boolean/valueOf (ns-owned? s)))))
+
+(defn- owned-name?
+  "A demunged frame name (ns/fn) is yours when its NAMESPACE resolves to a
+  classpath directory. The ns answer is cached; the frame answer is too,
+  because both are hot and neither changes within a process."
+  [^String s]
+  (and (str/includes? s "/")
+       (let [nsp (subs s 0 (.indexOf s "/"))]
+         (if (< (.size ns-own-cache) cache-max)
+           (.booleanValue ^Boolean (.computeIfAbsent ns-own-cache nsp ns-own-fn))
+           (ns-owned? nsp)))))
+
 (def ^:private own-fn
   (reify java.util.function.Function
-    (apply [_ s]
-      (Boolean/valueOf
-       (boolean (and (str/includes? ^String s "/")
-                     (not (some #(str/starts-with? ^String s %) noise-prefixes))))))))
+    (apply [_ s] (Boolean/valueOf (owned-name? s)))))
 
 (defn own-frame? [fn-name]
   (let [s (str fn-name)]
     (if (< (.size own-cache) cache-max)
       (.booleanValue ^Boolean (.computeIfAbsent own-cache s own-fn))
-      (and (clojure-frame? s)
-           (not (some #(str/starts-with? s %) noise-prefixes))))))
+      (owned-name? s))))
 
 (def ^:private ^java.util.concurrent.ConcurrentHashMap demunge-cache
   (java.util.concurrent.ConcurrentHashMap. 512))
