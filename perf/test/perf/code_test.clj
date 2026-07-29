@@ -48,14 +48,14 @@
   ;; the vector? bug: a lazy seq from take/filter was wrapped and iterated
   ;; as ONE note whose every key was nil -> NullPointerException.
   (let [ns (code/notes '(defn f [s] (.length s)))]
-    (is (string? (code/explain ns)))
-    (is (string? (code/explain (first ns))) "a single note map")
-    (is (string? (code/explain (take 1 ns))) "a lazy seq")
-    (is (string? (code/explain [])) "nothing")))
+    (is (string? (code/print-notes ns)))
+    (is (string? (code/print-notes (first ns))) "a single note map")
+    (is (string? (code/print-notes (take 1 ns))) "a lazy seq")
+    (is (string? (code/print-notes [])) "nothing")))
 
 (deftest explain-leads-with-the-fetch
   ;; emitted/took/refused before the interpretive lines; no authored prose.
-  (let [out (code/explain (code/notes '(defn f [a b] (+ a b))))]
+  (let [out (code/print-notes (code/notes '(defn f [a b] (+ a b))))]
     (is (re-find #"took:" out))
     (is (not (re-find #"why:" out)) "no authored why in the render")
     (is (not (re-find #"help:" out)) "no authored suggestion in the render")))

@@ -375,13 +375,33 @@
   synonyms (macroexpand/inline), op-mutations of its body, AND transducer
   fusion of a fusable seq pipeline — then classify each with the sound
   oracles and rank. The caller supplies NO candidates; they are derived from
-  the fragment. Op-mutation yields the differing-outcome sensitivity map;
-  fusion + inline yield equivalent rewrites that may be cheaper."
+  the fragment. Fusion + inline yield equivalent rewrites that may be
+  cheaper. Op-mutation yields the differing-outcome sensitivity map and is
+  OPT-IN — pass {:mutate? true}."
   ([form args] (discover form args {}))
-  ([form args opts]
+  ([form args {:keys [mutate?] :as opts}]
+   ;; MUTATIONS ARE OPT-IN, and the reason is OUTPUT, not cost. Measured
+   ;; on (fn [a b] (+ (* a b) a)) with reps 100000 trials 3:
+   ;;
+   ;;   candidates              1 synonym, 14 op-mutations
+   ;;   equivalent? per cand    4 ms
+   ;;   weigh per EQUIVALENT    361 ms
+   ;;   discover default        348 ms
+   ;;   discover :mutate? true  392 ms
+   ;;
+   ;; So mutations cost 13%, not the majority — classify only weighs an
+   ;; EQUIVALENT candidate, and every mutation is ruled out by the 4 ms
+   ;; check first. An earlier version of this comment claimed they were
+   ;; most of the wall clock; that was inferred from candidate COUNT and
+   ;; contradicted by the clock. The cost is `weigh`, on the one candidate
+   ;; worth weighing, and that cost is the point of weigh.
+   ;;
+   ;; What the flag actually buys is the ANSWER: 15 rows of which 14 are
+   ;; :differing-outcome, down to the 1 the caller asked for. The
+   ;; sensitivity map is worth having, so this is a flag, not a deletion.
    (let [body  (fn-body form)
          mech  (map #(fn-rebody form %) (synonyms body))
-         muts  (map #(fn-rebody form %) (op-mutations body))
+         muts  (when mutate? (map #(fn-rebody form %) (op-mutations body)))
          fused (when-let [t (transducer-fusion body)] [(fn-rebody form t)])
          cands (vec (distinct (remove #(= % form) (concat fused mech muts))))]
      (alternatives form cands args opts))))

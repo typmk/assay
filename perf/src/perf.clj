@@ -10,8 +10,8 @@
 
   Or, for the REPL, the two-liner:
 
-    (def c (perf/watch))            ; ... workload ...
-    (perf/summary c)
+    (def c (perf/record))           ; ... workload ...
+    (perf/dashboard c)
 
   DESIGN
     perf.model      the fact schema, plus datafy/nav
@@ -33,15 +33,24 @@
   (:require [perf.capture :as capture]
             [perf.query :as query]
             [perf.code]
+            [perf.measure :as measure]
             [perf.capability :as capability]))
 
-(defn watch
+;; `record`, not `watch`. perf.code/watch! collects COMPILER NOTES and
+;; this starts an ALLOCATION RECORDER — two unrelated operations one `!`
+;; apart, both reachable from a single (require '[perf :as perf]
+;; '[perf.code :as code]). The name here follows what it returns, which
+;; the docstring already said.
+(defn record
   "Start recording. Returns a RECORDER — a live handle, Closeable.
   `perf.capture/snapshot` turns what it has seen into a value."
   ([] (capture/start))
   ([opts] (capture/start opts)))
 
-(defn summary
+;; `dashboard`, not `summary`, for the same reason: perf.explain/summary
+;; renders the four oracles for a FORM, this renders a capture. Same word,
+;; unrelated subjects.
+(defn dashboard
   "The dashboard for a RECORDER or a SNAPSHOT. Taking a snapshot first
   means the same fn works on data that arrived over a socket."
   [r-or-snap]
@@ -147,3 +156,29 @@
     (perf/muffle!)                            ; clear"
   ([] (perf.code/muffle!))
   ([codes] (perf.code/muffle! codes)))
+
+;; The ladder's ACTIONABLE end. `notes` says what the compiler refused;
+;; these two say what to write instead and whether it actually helped —
+;; and they lived in perf.measure, reachable only if you already knew the
+;; namespace. The most valuable verbs were the least findable. Delegated
+;; on the same ground as `notes` and `java`: the ones people reach for.
+;;
+;; They stay in perf.measure because that is where BLAST RADIUS puts them
+;; — both RUN your code — and the delegation does not move them.
+
+(defn weigh
+  "The form as written against the form the compiler wanted, measured on
+  ARGS. `:verified` is the load-bearing key: true only when the rewrite
+  actually silenced the notes. See `perf.measure/weigh`.
+
+    (perf/weigh '(fn [a b] (+ a b)) [3 4])"
+  ([form args] (measure/weigh form args))
+  ([form args opts] (measure/weigh form args opts)))
+
+(defn fix
+  "The verified rewrite, as source you can paste — rustc suggests, cargo
+  fix applies, this hands you the text. See `perf.measure/fix`.
+
+    (perf/fix '(fn [a b] (+ a b)) [3 4])"
+  ([form args] (measure/fix form args))
+  ([form args opts] (measure/fix form args opts)))

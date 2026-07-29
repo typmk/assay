@@ -67,12 +67,21 @@
       (is (some #(and (:perf.forms/equivalent %)
                       (contains? #{:perf.forms/synonym :perf.forms/cheaper-synonym}
                                  (:perf.forms/kind %))) rows))
-      ;; op-swaps change the result — caught as differing over the edge+random pool
-      (is (some #(= :perf.forms/differing-outcome (:perf.forms/kind %)) rows))
+      ;; op-mutations are OPT-IN, so the default must NOT spend on them
+      (is (not-any? #(= :perf.forms/differing-outcome (:perf.forms/kind %)) rows)
+          "default discover yields equivalent rewrites only")
       ;; each classification was either PROVEN (rank 1, no samples needed) or
       ;; saw the full adversarial edge pool
       (is (every? #(or (= :perf.rank/proven (:perf.forms/rank %))
-                       (>= (:perf.forms/samples %) 49)) rows)))))
+                       (>= (:perf.forms/samples %) 49)) rows))))
+
+  (testing "{:mutate? true} restores the differing-outcome sensitivity map"
+    (let [rows (forms/discover '(fn [a b] (+ (* a b) a)) [3.0 5.0]
+                               {:reps 100000 :trials 3 :mutate? true})]
+      ;; op-swaps change the result — caught as differing over the edge+random pool
+      (is (some #(= :perf.forms/differing-outcome (:perf.forms/kind %)) rows))
+      ;; and the equivalent rewrites are still there alongside them
+      (is (some :perf.forms/equivalent rows)))))
 
 (deftest interval-difference-is-caught
   (testing "a form differing across a whole MID-RANGE interval is not mislabelled equivalent"

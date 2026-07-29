@@ -21,9 +21,9 @@
   argues against at length. It also meant a converter from
   perf.code/emitted-signature's qualified keys back to unqualified ones,
   purely to feed its own predicate, and a second rustc-shaped renderer
-  beside perf.code/explain. All three were the same mistake wearing
+  beside perf.code/print-notes. All three were the same mistake wearing
   different hats. Now: #:perf.note{...} like everything else, no adapter,
-  and `perf.code/explain` renders these too."
+  and `perf.code/print-notes` renders these too."
   (:require [clojure.string :as str]
             [perf.code :as code]))
 

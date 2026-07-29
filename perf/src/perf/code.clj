@@ -392,7 +392,11 @@
   [form]
   `(notes* ~(if (and (seq? form) (= 'quote (first form))) form `'~form)))
 
-(defn explain
+;; `print-notes`, not `explain`. It PRINTS, which its own last line
+;; already admitted ("Primary interface is the map, not this"), and
+;; `perf.explain/explain` is a different thing entirely — the four-oracle
+;; reading of a form. One name, two unrelated jobs, sibling namespaces.
+(defn print-notes
   "A thin conduit for the DERIVED strings on a note — the compiler's own
   message, the signature it emitted, the overloads it took and refused,
   and the cost number. perf authors none of this text; it passes through
