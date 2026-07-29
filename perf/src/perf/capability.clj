@@ -30,8 +30,15 @@
                                   (some? (prop "jdwp.port")))
                 :needs "jdwp agent at startup"
                 :remedy "clj -M:debug:cider  (JDI cannot attach to a running VM)"}
-   :self-attach {:available? #(= "true" (prop "jdk.attach.allowAttachSelf"))
-                 :needs "-Djdk.attach.allowAttachSelf=true"
+   ;; The JDK's own rule, from HotSpotVirtualMachine's static init, is
+   ;;   ALLOW_ATTACH_SELF = "".equals(s) || Boolean.parseBoolean(s)
+   ;; so a BARE -Djdk.attach.allowAttachSelf (property = "") enables it.
+   ;; Testing (= "true" s) reported self-attach missing on a JVM where the
+   ;; attach demonstrably succeeded, and require! then refused mem/ —
+   ;; a false negative that blocks a working capability. Match the JDK.
+   :self-attach {:available? #(when-let [s (prop "jdk.attach.allowAttachSelf")]
+                                (or (= "" s) (Boolean/parseBoolean s)))
+                 :needs "-Djdk.attach.allowAttachSelf (bare, or =true)"
                  :remedy "clj -M:perf  — required by mem/ and by nREPL's hard interrupt"}
    :nmt        {:available? #(jvm-arg? #"NativeMemoryTracking")
                 :needs "-XX:NativeMemoryTracking=summary"
