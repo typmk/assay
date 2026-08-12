@@ -283,11 +283,17 @@
         on  (javax.management.ObjectName. "com.sun.management:type=DiagnosticCommand")
         out (.invoke srv on "gcClassHistogram"
                      (into-array Object [nil]) (into-array String ["[Ljava.lang.String;"]))]
+    ;; No (drop n) for the header: the row-number guard below rejects the
+    ;; two header lines and the trailing Total, and a fixed drop silently
+    ;; ate rank #1 — which on a real heap is the largest class there is.
     (->> (clojure.string/split-lines (str out))
-         (drop 3)
          (keep (fn [l]
                  (let [p (remove empty? (clojure.string/split (clojure.string/trim l) #"\s+"))]
-                   (when (= 4 (count p))
+                   ;; JDK 9+ appends "(module)" to JDK class names, making them
+                   ;; FIVE fields where unnamed-module classes are four. Testing
+                   ;; (= 4) dropped every java.* row — String, [B, [Ljava.lang.Object;
+                   ;; — and reported a confident Clojure-only table.
+                   (when (<= 4 (count p) 5)
                      (let [[_ inst bytes cls] p]
                        (when (re-matches #"\d+" inst)
                          #:assay.class{:name (model/demunge cls)
