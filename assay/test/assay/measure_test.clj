@@ -8,7 +8,7 @@
             [assay.capture :as capture]
             [assay.query :as query]))
 
-(deftest weigh-against-explicit-alternative
+(deftest ^:slow weigh-against-explicit-alternative
   (testing "an explicit :against rewrite is measured even when the compiler is silent"
     (let [w (measure/weigh '(fn [a b] (reduce + (map * a b)))
                            [[1.0 2.0 3.0] [4.0 5.0 6.0]]
@@ -28,7 +28,7 @@
       (is (true? (:assay.weigh/same-result w)))
       (is (some? (:assay.weigh/factor w))))))
 
-(deftest weigh-against-catches-wrong-rewrite
+(deftest ^:slow weigh-against-catches-wrong-rewrite
   (testing "a rewrite that changes the answer is reported, not hidden"
     (let [w (measure/weigh '(fn [a b] (reduce + (map * a b)))
                            [[1.0 2.0 3.0] [4.0 5.0 6.0]]
@@ -37,7 +37,7 @@
       (is (false? (:assay.weigh/same-result w))
           "same-result must be false for a rewrite that returns a different value"))))
 
-(deftest weigh-numeric-tolerance
+(deftest ^:slow weigh-numeric-tolerance
   (testing "= would call (= 6 6.0) false; same? treats a primitive rewrite as equal"
     (let [w (measure/weigh '(fn [a b] (+ a b))       ; may return a Long
                            [3 4]

@@ -70,7 +70,7 @@
       (is (= '[Object Object] (:assay.types/params t)))
       (is (= '[Long Long] (:assay.types/actual t))))))
 
-(deftest weigh-measures-live-and-is-honest-below-resolution
+(deftest ^:slow weigh-measures-live-and-is-honest-below-resolution
   (testing "reflection: a large, real effect resolves cleanly"
     (let [w (measure/weigh '(fn [s] (.length s)) ["hello"] {:trials 3 :reps 200000})]
       (is (:assay.weigh/verified w) "the rewrite silenced the notes")
@@ -101,7 +101,7 @@
     (is (= warn0 (.getRawRoot #'*warn-on-reflection*)) "root restored")
     (is (= math0 (.getRawRoot #'*unchecked-math*)) "root restored")))
 
-(deftest fix-returns-a-verified-paste-able-rewrite
+(deftest ^:slow fix-returns-a-verified-paste-able-rewrite
   ;; fix returns non-nil ONLY when the rewrite recompiled clean — that is
   ;; the verification; there is no separate flag to trust.
   (let [f (measure/fix '(fn [a b] (+ a b)) [3 4])]

@@ -23,7 +23,7 @@
     (let [c (measure/cost '(fn [a b] (map * a b)) [[1.0 2.0] [3.0 4.0]] {:quick? true})]
       (is (true? (:assay.cost/lazy? c))))))
 
-(deftest needs-args-gate-is-not-a-tautology
+(deftest ^:slow needs-args-gate-is-not-a-tautology
   (testing "a NULLARY fn needs no args — COST measures it (review #5: the old
             gate counted fn-parts' 4-key map, always 4, so it always tripped)"
     (is (= :assay.rank/measured
@@ -39,7 +39,7 @@
       (is (some #(re-find #"unresolved" %) lines)
           "an all-boxed fn must surface its unresolved Object positions"))))
 
-(deftest blind?-is-sound-not-just-allocation
+(deftest ^:slow blind?-is-sound-not-just-allocation
   (testing "a primitive fn is NOT blind — nothing cheaper exists (review #2:
             the old blind? fired on (pos? bytes) alone, blessing optimal code)"
     (is (false? (:assay.explain/blind?
@@ -53,7 +53,7 @@
       (is (true? (:assay.explain/blind? e))
           "blind? composes STRUCTURE-silent with an OUTCOME byte-saving rewrite"))))
 
-(deftest blind?-carries-an-actionable-remedy
+(deftest ^:slow blind?-carries-an-actionable-remedy
   (testing "when blind?, explain attaches the cheapest byte-saving rewrite +
             savings (COST<->OUTCOME composition: a remedy, not just a verdict)"
     (let [e (explain/explain '(fn [xs] (->> xs (map inc) (filter even?) (reduce +)))

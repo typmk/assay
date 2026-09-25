@@ -39,7 +39,7 @@
                                 [[1.0 2.0 3.0] [4.0 5.0 6.0]] 40)]
       (is (true? (:assay.forms/equivalent eq))))))
 
-(deftest classify-labels-from-measured-coordinates
+(deftest ^:slow classify-labels-from-measured-coordinates
   (testing "differing outcome is labelled differing regardless of cost"
     (let [r (forms/classify '(fn [a b] (reduce + (map * a b)))
                             '(fn [a b] (reduce + (map + a b)))   ; + not *
@@ -56,7 +56,7 @@
       (is (contains? #{:assay.forms/synonym :assay.forms/cheaper-synonym}
                      (:assay.forms/kind r))))))
 
-(deftest discover-generates-from-the-fragment
+(deftest ^:slow discover-generates-from-the-fragment
   (testing "discover derives candidates from the form's own ops — no supplied list"
     (let [rows (forms/discover '(fn [a b] (+ (* a b) a)) [3.0 5.0] {:reps 100000 :trials 3})]
       (is (seq rows) "generated at least one candidate")
@@ -93,7 +93,7 @@
       (is (false? (:assay.forms/equivalent eq))
           "a difference on (100,1000) must be found by the magnitude sweep"))))
 
-(deftest discover-reaches-transducer-fusion
+(deftest ^:slow discover-reaches-transducer-fusion
   (testing "the generator finds a fused transducer for a reduce-over-seq-pipeline"
     (let [rows (forms/discover '(fn [xs] (->> xs (map inc) (filter even?) (reduce +)))
                                [(vec (range 300))] {:reps 15000 :trials 3})
