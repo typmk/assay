@@ -1,4 +1,8 @@
 ;; assay — observe a running JVM. The essential library.
 ;; No editor, no debugger, no FFM, no FlowStorm. Facts and queries.
 {:paths ["src"]
- :aliases {:test {:extra-paths ["test"]}}}
+ :aliases {:test {:extra-paths ["test"]
+                  :extra-deps {criterium/criterium                       {:mvn/version "0.4.6"}
+                               com.clojure-goes-fast/clj-async-profiler  {:mvn/version "1.8.0"}
+                               com.clojure-goes-fast/clj-java-decompiler {:mvn/version "0.3.7"}
+                               com.clojure-goes-fast/clj-memory-meter    {:mvn/version "0.5.0"}}}}}
