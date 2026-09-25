@@ -32,5 +32,5 @@ build () {                       # dir  jar  min-classes  ns...
   echo "$jar: $n classes, $(stat -c%s "$jar") bytes"
 }
 
-build assay assay.jar 100 assay.model assay.capability assay.capture assay.query assay.code assay.measure assay.range assay.forms assay.repl assay.explain assay
+build assay assay.jar 100 assay.model assay.capability assay.capture assay.emit assay.query assay.code assay.watch assay.measure assay.range assay.forms assay.repl assay.explain assay
 build ext  assay-ext.jar 40 assay.diagnose assay.control assay.native assay.flow assay.trace assay.remote assay.jit

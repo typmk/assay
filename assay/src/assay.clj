@@ -17,6 +17,7 @@
     assay.model      the fact schema, plus datafy/nav
     assay.capability what works here and why not — one registry
     assay.capture    start -> value; three mechanisms (stream/poll/census)
+    assay.emit       assay's own numbers written INTO the JFR stream
     assay.query      pure fns over observations — testable with literals
     assay.code       the ladder: expand -> notes -> java -> bytecode -> native
     assay.diagnose   structured diagnostics with machine-applicable fixes
@@ -33,13 +34,14 @@
   (:require [assay.capture :as capture]
             [assay.query :as query]
             [assay.code]
+            [assay.watch]
             [assay.measure :as measure]
             [assay.capability :as capability]))
 
-;; `record`, not `watch`. assay.code/watch! collects COMPILER NOTES and
+;; `record`, not `watch`. assay.watch/watch! collects COMPILER NOTES and
 ;; this starts an ALLOCATION RECORDER — two unrelated operations one `!`
 ;; apart, both reachable from a single (require '[assay :as assay]
-;; '[assay.code :as code]). The name here follows what it returns, which
+;; '[assay.watch :as watch]). The name here follows what it returns, which
 ;; the docstring already said.
 (defn record
   "Start recording. Returns a RECORDER — a live handle, Closeable.
@@ -76,18 +78,11 @@
 ;; (fn [] ...) for you, so nothing is lost at the keyboard.
 
 (defn allocated
-  "EXACT bytes allocated by calling F — not sampled.
-  Warm it first: a cold run allocates for classloading and JIT."
+  "EXACT bytes allocated by calling F — not sampled. See `assay.measure/allocated`."
   [f]
-  (let [tmx ^com.sun.management.ThreadMXBean
-        (java.lang.management.ManagementFactory/getThreadMXBean)
-        b (.getCurrentThreadAllocatedBytes tmx)]
-    (f)
-    (- (.getCurrentThreadAllocatedBytes tmx) b)))
+  (measure/allocated f))
 
-(defn- resolve! [sym]
-  (or (try (requiring-resolve sym) (catch Exception _ nil))
-      (throw (ex-info (str "could not resolve " sym) {:sym sym}))))
+(def ^:private resolve! assay.code/resolve!)
 
 (defn mean-ns
   "Mean nanoseconds for F, JIT-warmed. `time` measures the interpreter

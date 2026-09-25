@@ -6,7 +6,8 @@
   number that should not exist."
   (:require [clojure.test :refer [deftest is testing]]
             [assay.code :as code]
-            [assay.measure :as measure]))
+            [assay.measure :as measure]
+            [assay.watch :as watch]))
 
 (deftest notes-find-and-order
   (testing "reflection and boxed math are both found"
@@ -90,14 +91,14 @@
 (deftest watch-round-trips-the-root-bindings
   (let [warn0 (.getRawRoot #'*warn-on-reflection*)
         math0 (.getRawRoot #'*unchecked-math*)]
-    (code/watch!)
+    (watch/watch!)
     (eval '(defn watched-reflect [s] (.length s)))
     (eval '(defn watched-box [a b] (+ a b)))
-    (let [seen (set (map :assay.note/code (code/watched)))]
+    (let [seen (set (map :assay.note/code (watch/watched)))]
       (is (contains? seen :assay.note/reflection))
       (is (contains? seen :assay.note/boxed-math)
           "boxed-math fired — the thread-local shadow bug is fixed"))
-    (code/unwatch!)
+    (watch/unwatch!)
     (is (= warn0 (.getRawRoot #'*warn-on-reflection*)) "root restored")
     (is (= math0 (.getRawRoot #'*unchecked-math*)) "root restored")))
 
@@ -120,11 +121,11 @@
 
 (deftest watching?-reflects-state-not-output
   ;; red-team: the toggle could not turn OFF when watched was empty.
-  (is (false? (code/watching?)))
-  (code/watch!)
-  (is (true? (code/watching?)) "on, even with zero notes accrued yet")
-  (code/unwatch!)
-  (is (false? (code/watching?))))
+  (is (false? (watch/watching?)))
+  (watch/watch!)
+  (is (true? (watch/watching?)) "on, even with zero notes accrued yet")
+  (watch/unwatch!)
+  (is (false? (watch/watching?))))
 
 (deftest notes-parse-source-names-with-colons
   ;; The bug that only a LIVE nREPL surfaced: the compiler's source name

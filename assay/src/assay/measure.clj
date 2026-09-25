@@ -194,18 +194,17 @@
       (mapv (fn [k] (mapv #(jit % k) args)) (range 8))
       [(vec args)])))
 
-(defn- alloc-bytes
-  "Bytes THIS thread allocated running F once, via the ThreadMXBean counter.
-  Kept local to measure — the assay facade and capture read the same counter,
-  but depending on either from here would drag their weight onto the measure
-  path for two lines of MXBean access. Duplication is the cheaper trade."
+(defn allocated
+  "EXACT bytes THIS thread allocated calling F once — the ThreadMXBean
+  counter, not sampled. Warm it first: a cold run allocates for classloading
+  and JIT. The one implementation: the assay facade delegates here, which
+  costs the facade nothing since it already requires measure."
   ^long [f]
   (let [tmx ^com.sun.management.ThreadMXBean
         (java.lang.management.ManagementFactory/getThreadMXBean)
-        tid (.getId (Thread/currentThread))
-        b0 (.getThreadAllocatedBytes tmx tid)]
+        b0 (.getCurrentThreadAllocatedBytes tmx)]
     (f)
-    (- (.getThreadAllocatedBytes tmx tid) b0)))
+    (- (.getCurrentThreadAllocatedBytes tmx) b0)))
 
 ;; ── the harness is criterium's; only the thunk is ours ────────────
 ;;
@@ -304,7 +303,7 @@
   (let [n     (count sample-tuples)
         drive (pooled-thunk fn-form sample-tuples sink)]
     (dotimes [_ 100] (drive))                      ; load classes first
-    (quot (alloc-bytes drive) n)))
+    (quot (allocated drive) n)))
 
 (defn- sink-for [ret]
   (cond (and (number? ret) (not (integer? ret))) :double
